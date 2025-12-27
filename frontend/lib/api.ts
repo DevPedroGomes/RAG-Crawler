@@ -21,6 +21,20 @@ export interface ApiError {
   detail: string
 }
 
+export interface JobResponse {
+  ok: boolean
+  job_id: string
+  status: "queued" | "started" | "finished" | "failed"
+  message: string
+}
+
+export interface JobStatusResponse {
+  job_id: string
+  status: "queued" | "started" | "finished" | "failed" | "not_found"
+  result?: { status: string; message: string }
+  error?: string
+}
+
 class ApiClient {
   /**
    * Get headers for API requests
@@ -93,10 +107,11 @@ class ApiClient {
   }
 
   /**
-   * Upload a file for indexing
+   * Upload a file for background indexing
+   * Returns immediately with job_id. Use getJobStatus to poll for completion.
    * Requires authentication (cookies sent automatically)
    */
-  async uploadFile(file: File): Promise<{ ok: boolean; message: string }> {
+  async uploadFile(file: File): Promise<JobResponse> {
     const formData = new FormData()
     formData.append("file", file)
 
@@ -107,20 +122,28 @@ class ApiClient {
       headers["X-CSRF-Token"] = csrfToken
     }
 
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/ingest/upload`, {
+    const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
       method: "POST",
       headers,
       body: formData,
+      credentials: "include",
     })
+
+    // 202 Accepted is a success for async operations
+    if (!response.ok && response.status !== 202) {
+      const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+      throw new Error(error.detail || `Request failed: ${response.status}`)
+    }
 
     return response.json()
   }
 
   /**
-   * Crawl and index a URL
+   * Queue URL for background crawling and indexing
+   * Returns immediately with job_id. Use getJobStatus to poll for completion.
    * Requires authentication (cookies sent automatically)
    */
-  async crawlUrl(url: string): Promise<{ ok: boolean; message: string; url: string }> {
+  async crawlUrl(url: string): Promise<JobResponse> {
     const formData = new FormData()
     formData.append("url", url)
 
@@ -130,13 +153,57 @@ class ApiClient {
       headers["X-CSRF-Token"] = csrfToken
     }
 
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/ingest/crawl`, {
+    const response = await fetch(`${API_BASE_URL}/ingest/crawl`, {
       method: "POST",
       headers,
       body: formData,
+      credentials: "include",
+    })
+
+    // 202 Accepted is a success for async operations
+    if (!response.ok && response.status !== 202) {
+      const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
+      throw new Error(error.detail || `Request failed: ${response.status}`)
+    }
+
+    return response.json()
+  }
+
+  /**
+   * Get the status of a background job
+   * Requires authentication (cookies sent automatically)
+   */
+  async getJobStatus(jobId: string): Promise<JobStatusResponse> {
+    const response = await this.fetchWithCredentials(`${API_BASE_URL}/jobs/${jobId}`, {
+      method: "GET",
+      headers: this.getHeaders(false),
     })
 
     return response.json()
+  }
+
+  /**
+   * Poll job status until completion or failure
+   * @param jobId - The job ID to poll
+   * @param intervalMs - Polling interval in milliseconds (default: 2000)
+   * @param maxAttempts - Maximum polling attempts (default: 60 = 2 minutes)
+   */
+  async waitForJob(jobId: string, intervalMs = 2000, maxAttempts = 60): Promise<JobStatusResponse> {
+    for (let i = 0; i < maxAttempts; i++) {
+      const status = await this.getJobStatus(jobId)
+
+      if (status.status === "finished" || status.status === "failed" || status.status === "not_found") {
+        return status
+      }
+
+      await new Promise(resolve => setTimeout(resolve, intervalMs))
+    }
+
+    return {
+      job_id: jobId,
+      status: "failed",
+      error: "Timeout waiting for job completion"
+    }
   }
 
   /**

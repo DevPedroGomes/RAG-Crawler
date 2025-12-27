@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     JWT_ALG: str = os.getenv("JWT_ALG", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ragdb")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1200"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))

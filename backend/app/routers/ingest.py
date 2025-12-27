@@ -1,7 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Depends
+from fastapi.responses import JSONResponse
 from ..security import require_auth
-from ..ingestion import ingest_pdf, ingest_txt, embed_and_upsert, _to_vectors
-from ..crawler import render_urls
+from ..tasks import enqueue_file_task, enqueue_url_task
+from ..crawler import is_safe_url
 import tempfile
 import os
 from slowapi import Limiter
@@ -10,7 +11,7 @@ from slowapi.util import get_remote_address
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 limiter = Limiter(key_func=get_remote_address)
 
-@router.post("/upload")
+@router.post("/upload", status_code=202)
 @limiter.limit("10/hour")
 async def upload(
     request: Request,
@@ -18,31 +19,41 @@ async def upload(
     user_id: str = Depends(require_auth)
 ):
     """
-    Upload e indexação de documento
+    Upload document for background indexing.
 
-    Requer autenticação via cookie de sessão e CSRF token
+    Returns immediately with job_id. Use GET /jobs/{job_id} to check status.
+    Requires session cookie and CSRF token.
     """
-    ext = (file.filename or "").lower()
+    filename = file.filename or "document.txt"
+    ext = filename.lower()
+    is_pdf = ext.endswith(".pdf")
 
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+    # Save file to temp location (will be deleted by worker after processing)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
         content = await file.read()
         tmp.write(content)
-        path = tmp.name
+        file_path = tmp.name
 
     try:
-        if ext.endswith(".pdf"):
-            ingest_pdf(path, source=file.filename or "document.pdf", namespace=user_id)
-        else:
-            text = content.decode("utf-8", errors="ignore")
-            ingest_txt(text, source=file.filename or "document.txt", namespace=user_id)
+        # Enqueue task for background processing
+        job_id = enqueue_file_task(file_path, filename, is_pdf, user_id)
 
-        return {"ok": True, "message": f"Documento '{file.filename}' indexado com sucesso"}
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "job_id": job_id,
+                "status": "queued",
+                "message": f"Document '{filename}' queued for processing"
+            }
+        )
     except Exception as e:
-        raise HTTPException(500, f"Erro ao processar documento: {str(e)}")
-    finally:
-        os.unlink(path)
+        # Clean up file if enqueueing fails
+        if os.path.exists(file_path):
+            os.unlink(file_path)
+        raise HTTPException(500, f"Error queuing document: {str(e)}")
 
-@router.post("/crawl")
+@router.post("/crawl", status_code=202)
 @limiter.limit("10/hour")
 async def crawl(
     request: Request,
@@ -50,22 +61,28 @@ async def crawl(
     user_id: str = Depends(require_auth)
 ):
     """
-    Indexação de URL via crawler
+    Queue URL for background crawling and indexing.
 
-    Requer autenticação via cookie de sessão e CSRF token
+    Returns immediately with job_id. Use GET /jobs/{job_id} to check status.
+    Requires session cookie and CSRF token.
     """
+    # Validate URL before queuing (SSRF protection)
+    is_valid, error_msg = is_safe_url(url)
+    if not is_valid:
+        raise HTTPException(400, f"URL blocked: {error_msg}")
+
     try:
-        docs = await render_urls([url])
-        text = "\n".join(d["page_content"] for d in docs)
+        # Enqueue task for background processing
+        job_id = enqueue_url_task(url, user_id)
 
-        if not text.strip():
-            raise HTTPException(400, "Não foi possível extrair conteúdo da URL")
-
-        vectors = _to_vectors(text, source=url)
-        embed_and_upsert(vectors, namespace=user_id)
-
-        return {"ok": True, "message": f"URL '{url}' indexada com sucesso", "url": url}
-    except HTTPException:
-        raise
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "job_id": job_id,
+                "status": "queued",
+                "message": f"URL '{url}' queued for indexing"
+            }
+        )
     except Exception as e:
-        raise HTTPException(500, f"Erro ao indexar URL: {str(e)}")
+        raise HTTPException(500, f"Error queuing URL: {str(e)}")

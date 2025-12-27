@@ -27,8 +27,12 @@ tenacity==9.0.0
 python-dotenv==1.0.1
 PyPDF2==3.0.1
 
-# Redis for session storage
+# Redis for session storage and job queue
 redis==5.0.1
+rq==1.16.0
+
+# PostgreSQL
+psycopg2-binary==2.9.9
 
 # Rate limiting
 slowapi==0.1.9

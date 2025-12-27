@@ -1,14 +1,17 @@
+import time
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from .database import Base, engine
-from .routers import auth, ingest, chat, admin
-import time
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+from .database import Base, engine
+from .routers import auth, ingest, chat, admin, jobs
 from .background import start_background_tasks, stop_background_tasks
-from contextlib import asynccontextmanager
+from .crawler import BrowserPool
 
 # Cria as tabelas do banco de dados
 Base.metadata.create_all(bind=engine)
@@ -19,19 +22,22 @@ limiter = Limiter(key_func=get_remote_address)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Gerencia lifecycle da aplicação:
-    - Startup: inicia background tasks
-    - Shutdown: para background tasks
+    Manage application lifecycle:
+    - Startup: Start background tasks
+    - Shutdown: Stop background tasks, close browser pool
     """
     # Startup
-    print("🚀 [Startup] Iniciando background tasks...")
+    print("[Startup] Starting background tasks...")
     start_background_tasks()
 
     yield
 
     # Shutdown
-    print("🛑 [Shutdown] Parando background tasks...")
+    print("[Shutdown] Stopping background tasks...")
     stop_background_tasks()
+
+    print("[Shutdown] Closing browser pool...")
+    await BrowserPool.close()
 
 app = FastAPI(
     title="PG Multiuser RAG",
@@ -122,6 +128,7 @@ app.include_router(auth.router)
 app.include_router(ingest.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
+app.include_router(jobs.router)
 
 @app.get("/health")
 def health():

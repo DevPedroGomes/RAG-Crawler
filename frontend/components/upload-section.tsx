@@ -8,11 +8,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { api } from "@/lib/api"
-import { Upload, Link2, Loader2, CheckCircle2 } from "lucide-react"
+import { Upload, Link2, Loader2, CheckCircle2, Clock } from "lucide-react"
 
 export function UploadSection() {
   const [fileLoading, setFileLoading] = useState(false)
+  const [fileProcessing, setFileProcessing] = useState(false)
   const [urlLoading, setUrlLoading] = useState(false)
+  const [urlProcessing, setUrlProcessing] = useState(false)
   const [url, setUrl] = useState("")
   const [fileSuccess, setFileSuccess] = useState("")
   const [urlSuccess, setUrlSuccess] = useState("")
@@ -28,8 +30,20 @@ export function UploadSection() {
     setFileLoading(true)
 
     try {
-      await api.uploadFile(file)
-      setFileSuccess(`${file.name} uploaded successfully`)
+      // Queue file for processing
+      const jobResponse = await api.uploadFile(file)
+      setFileLoading(false)
+      setFileProcessing(true)
+
+      // Poll for job completion
+      const result = await api.waitForJob(jobResponse.job_id)
+
+      if (result.status === "finished" && result.result?.status === "completed") {
+        setFileSuccess(result.result.message || `${file.name} indexed successfully`)
+      } else {
+        setError(result.error || result.result?.message || "Processing failed")
+      }
+
       if (fileInputRef.current) {
         fileInputRef.current.value = ""
       }
@@ -37,6 +51,7 @@ export function UploadSection() {
       setError(err instanceof Error ? err.message : "Upload failed")
     } finally {
       setFileLoading(false)
+      setFileProcessing(false)
     }
   }
 
@@ -49,13 +64,25 @@ export function UploadSection() {
     setUrlLoading(true)
 
     try {
-      await api.crawlUrl(url)
-      setUrlSuccess("URL indexed successfully")
-      setUrl("")
+      // Queue URL for processing
+      const jobResponse = await api.crawlUrl(url)
+      setUrlLoading(false)
+      setUrlProcessing(true)
+
+      // Poll for job completion
+      const result = await api.waitForJob(jobResponse.job_id)
+
+      if (result.status === "finished" && result.result?.status === "completed") {
+        setUrlSuccess(result.result.message || "URL indexed successfully")
+        setUrl("")
+      } else {
+        setError(result.error || result.result?.message || "Indexing failed")
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "URL indexing failed")
     } finally {
       setUrlLoading(false)
+      setUrlProcessing(false)
     }
   }
 
@@ -78,14 +105,20 @@ export function UploadSection() {
               type="file"
               accept=".pdf,.txt"
               onChange={handleFileUpload}
-              disabled={fileLoading}
+              disabled={fileLoading || fileProcessing}
               className="cursor-pointer bg-background file:mr-4 file:rounded-md file:border-0 file:bg-primary file:px-4 file:py-2 file:text-sm file:font-medium file:text-primary-foreground hover:file:bg-primary/90"
             />
           </div>
           {fileLoading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Uploading and indexing...
+              Uploading...
+            </div>
+          )}
+          {fileProcessing && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Clock className="h-4 w-4 animate-pulse" />
+              Processing document...
             </div>
           )}
           {fileSuccess && (
@@ -115,15 +148,20 @@ export function UploadSection() {
                 placeholder="https://example.com"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                disabled={urlLoading}
+                disabled={urlLoading || urlProcessing}
                 className="bg-background"
               />
             </div>
-            <Button type="submit" disabled={urlLoading || !url.trim()} className="w-full">
+            <Button type="submit" disabled={urlLoading || urlProcessing || !url.trim()} className="w-full">
               {urlLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Indexing...
+                  Queueing...
+                </>
+              ) : urlProcessing ? (
+                <>
+                  <Clock className="mr-2 h-4 w-4 animate-pulse" />
+                  Processing...
                 </>
               ) : (
                 "Index URL"

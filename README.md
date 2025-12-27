@@ -7,18 +7,23 @@ A multiuser RAG (Retrieval-Augmented Generation) application with secure authent
 ```
 Frontend (Next.js 15)          Backend (FastAPI)
         |                            |
-        | credentials: include       | Redis (sessions)
-        | X-CSRF-Token header        | SQLite (users)
+        | credentials: include       | PostgreSQL (users)
+        | X-CSRF-Token header        | Redis (sessions + job queue)
         |                            |
         └──────────────────────────> Pinecone (vectors, namespace = user_id)
                                      OpenAI (embeddings + LLM)
+
+                                     RQ Worker (background processing)
+                                          |
+                                          └──> Document embedding, URL crawling
 ```
 
 **Stack:**
-- Backend: FastAPI, Redis sessions, SQLAlchemy, LangChain
+- Backend: FastAPI, PostgreSQL, Redis (sessions + RQ), SQLAlchemy, LangChain
 - Frontend: Next.js 15, React 19, shadcn/ui, Tailwind CSS 4
 - Vector DB: Pinecone (serverless)
 - LLM: OpenAI gpt-4o-mini + text-embedding-3-small
+- Background Jobs: Redis Queue (RQ)
 
 ## Security Features
 
@@ -34,13 +39,23 @@ Frontend (Next.js 15)          Backend (FastAPI)
 
 - Python 3.9+
 - Node.js 18+ or 20+
+- PostgreSQL 14+
 - Redis server
 - Pinecone account
 - OpenAI API key
 
 ## Quick Start
 
-### Backend
+### 1. Database Setup
+
+```bash
+# Create PostgreSQL database
+createdb ragdb
+# Or using psql:
+# psql -U postgres -c "CREATE DATABASE ragdb;"
+```
+
+### 2. Backend
 
 ```bash
 cd backend
@@ -51,11 +66,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 python -m playwright install chromium
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys and DATABASE_URL
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Frontend
+### 3. Background Worker
+
+In a separate terminal, start the RQ worker for background processing:
+
+```bash
+cd backend
+source venv/bin/activate
+rq worker --url redis://localhost:6379/0
+```
+
+### 4. Frontend
 
 ```bash
 cd frontend
@@ -104,8 +129,14 @@ Access at http://localhost:3000
 
 | Method | Endpoint | Description | Rate Limit |
 |--------|----------|-------------|------------|
-| POST | /ingest/upload | Upload PDF/TXT | 10/hour |
-| POST | /ingest/crawl | Index URL | 10/hour |
+| POST | /ingest/upload | Queue PDF/TXT for processing (returns job_id) | 10/hour |
+| POST | /ingest/crawl | Queue URL for indexing (returns job_id) | 10/hour |
+
+### Jobs (requires auth)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /jobs/{job_id} | Get job status (queued/started/finished/failed) |
 
 ### Chat (requires auth + CSRF)
 
@@ -128,16 +159,18 @@ rag-crawler-indexer/
 │   ├── app/
 │   │   ├── routers/
 │   │   │   ├── auth.py         # Authentication endpoints
-│   │   │   ├── ingest.py       # Document upload/crawl
+│   │   │   ├── ingest.py       # Document upload/crawl (async)
 │   │   │   ├── chat.py         # RAG chat
+│   │   │   ├── jobs.py         # Job status endpoint
 │   │   │   └── admin.py        # Admin operations
 │   │   ├── main.py             # FastAPI app + middleware
 │   │   ├── security.py         # Session + CSRF handling
 │   │   ├── session_store.py    # Redis session store
+│   │   ├── tasks.py            # RQ background tasks
 │   │   ├── rag.py              # RAG logic
 │   │   ├── ingestion.py        # Document processing
-│   │   ├── crawler.py          # Web crawler
-│   │   └── background.py       # Background tasks
+│   │   ├── crawler.py          # Web crawler + browser pool
+│   │   └── background.py       # Scheduled tasks
 │   ├── requirements.txt
 │   └── setup.sh
 └── frontend/
@@ -148,9 +181,9 @@ rag-crawler-indexer/
     ├── components/
     │   ├── auth-form.tsx
     │   ├── chat-section.tsx
-    │   └── upload-section.tsx
+    │   └── upload-section.tsx  # With job polling
     ├── lib/
-    │   ├── api.ts              # API client with CSRF
+    │   ├── api.ts              # API client with CSRF + job status
     │   ├── auth.ts             # Auth utilities
     │   └── utils.ts            # Helpers
     └── package.json
@@ -158,15 +191,13 @@ rag-crawler-indexer/
 
 ## Known Limitations
 
-1. **SQLite Database**: The user database uses SQLite which does not handle concurrent writes well. For production with 50+ users, migrate to PostgreSQL.
+1. **CORS Configuration**: Only localhost origins are configured. Add production domains in `backend/app/main.py`.
 
-2. **Synchronous Processing**: Document embedding and web crawling block the request thread. Consider adding a background job queue (Celery, RQ) for production.
+2. **Cookie secure=True**: Requires HTTPS. For local HTTP development, set `secure=False` in `backend/app/security.py`.
 
-3. **Browser Not Pooled**: Each crawl request creates/destroys a Chromium instance. Implement browser pooling for high-traffic scenarios.
+3. **Single Worker**: For high traffic, run multiple RQ workers: `rq worker -c 4` or use a process manager.
 
-4. **CORS Configuration**: Only localhost origins are configured. Add production domains in `backend/app/main.py`.
-
-5. **Cookie secure=True**: Requires HTTPS. For local HTTP development, set `secure=False` in `backend/app/security.py`.
+4. **No Job Persistence**: Job results are stored in Redis with default TTL. Configure RQ result TTL for longer retention if needed.
 
 ## Troubleshooting
 
@@ -191,3 +222,13 @@ python -m playwright install chromium
 ### CORS errors
 - Verify `credentials: "include"` in frontend
 - Check backend CORS origins match frontend URL
+
+### Jobs stuck in "queued" status
+- Ensure RQ worker is running: `rq worker --url redis://localhost:6379/0`
+- Check Redis connection: `redis-cli ping`
+- View queue: `rq info --url redis://localhost:6379/0`
+
+### Database connection errors
+- Verify PostgreSQL is running
+- Check DATABASE_URL format: `postgresql://user:password@host:port/database`
+- Ensure database exists: `createdb ragdb`
