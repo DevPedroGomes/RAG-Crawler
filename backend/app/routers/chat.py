@@ -1,13 +1,44 @@
+import logging
 from fastapi import APIRouter, HTTPException, Body, Request, Depends
 from ..security import require_auth
-from ..schemas import ChatIn
+from ..schemas import ChatIn, DocumentCountOut
 from ..rag import answer
-from ..pinecone_client import delete_namespace
+from ..pgvector_store import delete_user_documents, get_document_count, get_unique_source_count
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/chat", tags=["chat"])
 limiter = Limiter(key_func=get_remote_address)
+
+
+MAX_DOCUMENTS_PER_USER = 5  # Keep in sync with ingest.py
+
+
+@router.get("/documents", response_model=DocumentCountOut)
+def get_documents(
+    request: Request,
+    user_id: str = Depends(require_auth)
+):
+    """
+    Get the count of indexed documents for the current user.
+    Used to check if user can start chatting and show limits.
+    """
+    try:
+        chunk_count = get_document_count(user_id)
+        source_count = get_unique_source_count(user_id)
+        return DocumentCountOut(
+            count=chunk_count,
+            has_documents=chunk_count > 0,
+            documents_used=source_count,
+            documents_limit=MAX_DOCUMENTS_PER_USER,
+            can_upload=source_count < MAX_DOCUMENTS_PER_USER
+        )
+    except Exception as e:
+        logger.error(f"Error getting document count: {e}")
+        return DocumentCountOut(count=0, has_documents=False)
+
 
 @router.post("/ask")
 @limiter.limit("20/minute")
@@ -17,15 +48,29 @@ def ask(
     user_id: str = Depends(require_auth)
 ):
     """
-    Faz pergunta ao RAG usando documentos indexados do usuário
+    Ask a question to the RAG system with conversation history.
 
-    Requer autenticação via cookie de sessão e CSRF token
+    The chat_history parameter allows the LLM to maintain context
+    across multiple turns of conversation.
+
+    Requires Clerk JWT authentication.
     """
     try:
-        result = answer(payload.question, namespace=user_id)
+        # Convert chat history to list of dicts
+        chat_history = None
+        if payload.chat_history:
+            chat_history = [{"role": m.role, "content": m.content} for m in payload.chat_history]
+
+        result = answer(
+            question=payload.question,
+            user_id=user_id,
+            chat_history=chat_history
+        )
         return result
     except Exception as e:
-        raise HTTPException(500, f"Erro ao processar pergunta: {str(e)}")
+        logger.error(f"Error processing question: {e}")
+        raise HTTPException(500, "Error processing your question. Please try again.")
+
 
 @router.post("/reset")
 def reset(
@@ -33,12 +78,13 @@ def reset(
     user_id: str = Depends(require_auth)
 ):
     """
-    Limpa todos os documentos indexados do usuário
+    Delete all indexed documents for the current user.
 
-    Requer autenticação via cookie de sessão e CSRF token
+    Requires Clerk JWT authentication.
     """
     try:
-        delete_namespace(user_id)
-        return {"ok": True, "message": "Índice limpo com sucesso"}
+        delete_user_documents(user_id)
+        return {"ok": True, "message": "Knowledge base reset successfully"}
     except Exception as e:
-        raise HTTPException(500, f"Erro ao limpar índice: {str(e)}")
+        logger.error(f"Error resetting knowledge base: {e}")
+        raise HTTPException(500, "Error resetting knowledge base. Please try again.")

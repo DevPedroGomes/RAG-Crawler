@@ -1,4 +1,9 @@
-import { getCSRFToken } from "./utils"
+/**
+ * API Client for RAG Backend
+ *
+ * Uses Clerk JWT for authentication via Authorization header.
+ * CSRF tokens no longer needed with stateless JWT auth.
+ */
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -15,6 +20,19 @@ export interface ChatSource {
 export interface ChatResponse {
   answer: string
   sources: ChatSource[]
+}
+
+export interface ChatHistoryMessage {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface DocumentCountResponse {
+  count: number
+  has_documents: boolean
+  documents_used: number
+  documents_limit: number
+  can_upload: boolean
 }
 
 export interface ApiError {
@@ -36,20 +54,27 @@ export interface JobStatusResponse {
 }
 
 class ApiClient {
+  private getToken: (() => Promise<string | null>) | null = null
+
   /**
-   * Get headers for API requests
-   * Includes CSRF token for mutating requests
+   * Set the token getter function (called from React components with Clerk's useAuth)
    */
-  private getHeaders(includeCSRF: boolean = true): HeadersInit {
+  setTokenGetter(getter: () => Promise<string | null>) {
+    this.getToken = getter
+  }
+
+  /**
+   * Get headers with Authorization Bearer token
+   */
+  private async getHeaders(): Promise<HeadersInit> {
     const headers: HeadersInit = {
       "Content-Type": "application/json",
     }
 
-    // Add CSRF token for POST, PUT, PATCH, DELETE requests
-    if (includeCSRF) {
-      const csrfToken = getCSRFToken()
-      if (csrfToken) {
-        headers["X-CSRF-Token"] = csrfToken
+    if (this.getToken) {
+      const token = await this.getToken()
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`
       }
     }
 
@@ -57,19 +82,34 @@ class ApiClient {
   }
 
   /**
-   * Make a fetch request with credentials and error handling
+   * Get auth header only (for FormData requests)
    */
-  private async fetchWithCredentials(
-    url: string,
-    options: RequestInit = {}
-  ): Promise<Response> {
+  private async getAuthHeader(): Promise<HeadersInit> {
+    const headers: HeadersInit = {}
+
+    if (this.getToken) {
+      const token = await this.getToken()
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`
+      }
+    }
+
+    return headers
+  }
+
+  /**
+   * Make authenticated fetch request
+   */
+  private async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+    const headers = await this.getHeaders()
+
     const response = await fetch(url, {
       ...options,
-      credentials: "include", // CRITICAL: Send cookies
+      headers: { ...headers, ...options.headers },
     })
 
     if (!response.ok) {
-      const error: ApiError = await response.json().catch(() => ({
+      const error = await response.json().catch(() => ({
         detail: `HTTP error ${response.status}`,
       }))
       throw new Error(error.detail || `Request failed: ${response.status}`)
@@ -79,54 +119,19 @@ class ApiClient {
   }
 
   /**
-   * Sign up a new user
-   * Backend sets HttpOnly cookies on success
-   */
-  async signup(email: string, password: string): Promise<AuthResponse> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/auth/signup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    })
-
-    return response.json()
-  }
-
-  /**
-   * Log in an existing user
-   * Backend sets HttpOnly cookies on success
-   */
-  async login(email: string, password: string): Promise<AuthResponse> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    })
-
-    return response.json()
-  }
-
-  /**
    * Upload a file for background indexing
    * Returns immediately with job_id. Use getJobStatus to poll for completion.
-   * Requires authentication (cookies sent automatically)
    */
   async uploadFile(file: File): Promise<JobResponse> {
     const formData = new FormData()
     formData.append("file", file)
 
-    // For FormData, don't set Content-Type (browser sets it with boundary)
-    const csrfToken = getCSRFToken()
-    const headers: HeadersInit = {}
-    if (csrfToken) {
-      headers["X-CSRF-Token"] = csrfToken
-    }
+    const headers = await this.getAuthHeader()
 
     const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
       method: "POST",
       headers,
       body: formData,
-      credentials: "include",
     })
 
     // 202 Accepted is a success for async operations
@@ -141,23 +146,17 @@ class ApiClient {
   /**
    * Queue URL for background crawling and indexing
    * Returns immediately with job_id. Use getJobStatus to poll for completion.
-   * Requires authentication (cookies sent automatically)
    */
   async crawlUrl(url: string): Promise<JobResponse> {
     const formData = new FormData()
     formData.append("url", url)
 
-    const csrfToken = getCSRFToken()
-    const headers: HeadersInit = {}
-    if (csrfToken) {
-      headers["X-CSRF-Token"] = csrfToken
-    }
+    const headers = await this.getAuthHeader()
 
     const response = await fetch(`${API_BASE_URL}/ingest/crawl`, {
       method: "POST",
       headers,
       body: formData,
-      credentials: "include",
     })
 
     // 202 Accepted is a success for async operations
@@ -171,12 +170,10 @@ class ApiClient {
 
   /**
    * Get the status of a background job
-   * Requires authentication (cookies sent automatically)
    */
   async getJobStatus(jobId: string): Promise<JobStatusResponse> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/jobs/${jobId}`, {
+    const response = await this.fetchWithAuth(`${API_BASE_URL}/jobs/${jobId}`, {
       method: "GET",
-      headers: this.getHeaders(false),
     })
 
     return response.json()
@@ -207,14 +204,23 @@ class ApiClient {
   }
 
   /**
-   * Ask a question to the RAG system
-   * Requires authentication (cookies sent automatically)
+   * Ask a question to the RAG system with conversation history
    */
-  async ask(question: string): Promise<ChatResponse> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/chat/ask`, {
+  async ask(question: string, chatHistory: ChatHistoryMessage[] = []): Promise<ChatResponse> {
+    const response = await this.fetchWithAuth(`${API_BASE_URL}/chat/ask`, {
       method: "POST",
-      headers: this.getHeaders(true),
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, chat_history: chatHistory }),
+    })
+
+    return response.json()
+  }
+
+  /**
+   * Check if user has indexed documents
+   */
+  async getDocumentCount(): Promise<DocumentCountResponse> {
+    const response = await this.fetchWithAuth(`${API_BASE_URL}/chat/documents`, {
+      method: "GET",
     })
 
     return response.json()
@@ -222,12 +228,10 @@ class ApiClient {
 
   /**
    * Reset the knowledge base (delete all indexed documents)
-   * Requires authentication (cookies sent automatically)
    */
   async reset(): Promise<{ ok: boolean; message: string }> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/chat/reset`, {
+    const response = await this.fetchWithAuth(`${API_BASE_URL}/chat/reset`, {
       method: "POST",
-      headers: this.getHeaders(true),
       body: JSON.stringify({}),
     })
 
@@ -235,13 +239,12 @@ class ApiClient {
   }
 
   /**
-   * Log out the user
-   * Backend clears cookies and deletes Pinecone namespace
+   * Clear all user data from the knowledge base
+   * Note: Logout is handled by Clerk on the frontend
    */
-  async logout(): Promise<{ ok: boolean; message: string }> {
-    const response = await this.fetchWithCredentials(`${API_BASE_URL}/admin/logout`, {
+  async clearUserData(): Promise<{ ok: boolean; message: string }> {
+    const response = await this.fetchWithAuth(`${API_BASE_URL}/admin/clear-data`, {
       method: "POST",
-      headers: this.getHeaders(true),
       body: JSON.stringify({}),
     })
 

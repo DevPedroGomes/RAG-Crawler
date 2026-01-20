@@ -1,76 +1,60 @@
 """
-Background Tasks - Tarefas periódicas em background
+Background Tasks - Periodic maintenance tasks
 
-Implementa scheduler para executar tarefas de manutenção:
-- Cleanup de sessões expiradas
-- Logging de estatísticas
+Includes automatic cleanup of inactive user documents (showcase mode).
 """
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 import logging
-from .session_store import cleanup_expired_sessions
+from .user_activity import cleanup_inactive_users
 
-# Logger
 logger = logging.getLogger(__name__)
-
-# Scheduler global
 _scheduler: AsyncIOScheduler | None = None
 
-def get_scheduler() -> AsyncIOScheduler:
-    """
-    Retorna scheduler (singleton)
 
-    Returns:
-        AsyncIOScheduler instance
-    """
+def get_scheduler() -> AsyncIOScheduler:
+    """Returns scheduler (singleton)"""
     global _scheduler
     if _scheduler is None:
         _scheduler = AsyncIOScheduler()
     return _scheduler
 
-def session_cleanup_task():
-    """
-    Task periódica: cleanup de sessões expiradas
 
-    Com Redis, sessões expiram automaticamente via TTL.
-    Esta task apenas loga estatísticas úteis.
-    """
+def _run_cleanup():
+    """Run the inactive user cleanup task."""
     try:
-        count = cleanup_expired_sessions()
-        logger.info(f"[Background Task] Session cleanup completado. Sessões ativas: {count}")
+        cleaned = cleanup_inactive_users()
+        if cleaned > 0:
+            logger.info(f"[Cleanup Task] Cleaned up documents for {cleaned} inactive users")
     except Exception as e:
-        logger.error(f"[Background Task] Erro no cleanup de sessões: {e}")
+        logger.error(f"[Cleanup Task] Error during cleanup: {e}")
+
 
 def start_background_tasks():
     """
-    Inicia todas as background tasks
+    Start background tasks.
 
-    Chamada automaticamente no startup da aplicação
+    - Inactive user cleanup: Runs every minute to clean up documents
+      for users inactive for more than 10 minutes (showcase mode).
     """
     scheduler = get_scheduler()
 
-    # Task 1: Cleanup de sessões a cada 30 minutos
+    # Add cleanup job - runs every minute
     scheduler.add_job(
-        session_cleanup_task,
-        trigger=IntervalTrigger(minutes=30),
-        id="session_cleanup",
-        name="Cleanup de sessões expiradas",
-        replace_existing=True
+        _run_cleanup,
+        'interval',
+        minutes=1,
+        id='inactive_user_cleanup',
+        replace_existing=True,
+        max_instances=1  # Prevent overlapping runs
     )
 
-    # Iniciar scheduler
     scheduler.start()
-    logger.info("[Background Tasks] Scheduler iniciado com sucesso")
-    logger.info("[Background Tasks] - session_cleanup: a cada 30 minutos")
+    logger.info("[Background Tasks] Scheduler started with inactive user cleanup (every 1 minute)")
+
 
 def stop_background_tasks():
-    """
-    Para todas as background tasks
-
-    Chamada automaticamente no shutdown da aplicação
-    """
+    """Stop all background tasks"""
     scheduler = get_scheduler()
     if scheduler.running:
         scheduler.shutdown(wait=True)
-        logger.info("[Background Tasks] Scheduler parado com sucesso")
+        logger.info("[Background Tasks] Scheduler stopped")

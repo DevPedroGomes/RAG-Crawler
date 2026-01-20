@@ -1,9 +1,10 @@
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
+"""
+Database Models
+
+User model removed - Clerk is now the source of truth for user data.
+Keep this file for future non-auth models if needed.
+"""
 from .database import Base
 
-class User(Base):
-    __tablename__ = "users"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
+# User model removed - authentication handled by Clerk
+# All user data isolation uses Clerk user_id from JWT

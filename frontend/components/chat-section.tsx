@@ -1,36 +1,104 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type ChatResponse } from "@/lib/api"
-import { MessageSquare, Send, RotateCcw, Loader2, FileText } from "lucide-react"
+import { MessageSquare, Send, RotateCcw, Loader2, FileText, User, Bot, AlertCircle, Info } from "lucide-react"
+import { cn } from "@/lib/utils"
 
-export function ChatSection() {
+interface Message {
+  id: string
+  role: "user" | "assistant" | "system"
+  content: string
+  sources?: { url: string; preview: string }[]
+  timestamp: Date
+}
+
+interface ChatSectionProps {
+  hasDocuments: boolean
+  onReset?: () => void
+  systemMessage?: { id: string; content: string } | null  // System message with unique ID
+}
+
+export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectionProps) {
+  const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
-  const [response, setResponse] = useState<ChatResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom when new messages arrive
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages])
+
+  // Add system message when new document is uploaded
+  useEffect(() => {
+    if (systemMessage) {
+      const sysMsg: Message = {
+        id: systemMessage.id,
+        role: "system",
+        content: systemMessage.content,
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, sysMsg])
+    }
+  }, [systemMessage?.id])
 
   const handleAsk = async () => {
-    if (!question.trim()) return
+    if (!question.trim() || !hasDocuments) return
 
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: question.trim(),
+      timestamp: new Date(),
+    }
+
+    setMessages((prev) => [...prev, userMessage])
+    setQuestion("")
     setError("")
     setLoading(true)
 
     try {
-      const result = await api.ask(question)
-      setResponse(result)
+      // Send chat history along with the question
+      const chatHistory = messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }))
+
+      const result = await api.ask(question.trim(), chatHistory)
+
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: result.answer,
+        sources: result.sources,
+        timestamp: new Date(),
+      }
+
+      setMessages((prev) => [...prev, assistantMessage])
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to get answer")
+      // Remove the user message if request failed
+      setMessages((prev) => prev.filter((m) => m.id !== userMessage.id))
     } finally {
       setLoading(false)
     }
   }
 
   const handleReset = async () => {
-    if (!confirm("Are you sure you want to reset your knowledge base? This will delete all indexed documents.")) {
+    if (
+      !confirm(
+        "Are you sure you want to reset your knowledge base? This will delete all indexed documents and chat history."
+      )
+    ) {
       return
     }
 
@@ -39,9 +107,9 @@ export function ChatSection() {
 
     try {
       await api.reset()
-      setResponse(null)
+      setMessages([])
       setQuestion("")
-      alert("Knowledge base reset successfully")
+      onReset?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Reset failed")
     } finally {
@@ -49,23 +117,152 @@ export function ChatSection() {
     }
   }
 
+  const handleClearChat = () => {
+    if (messages.length === 0) return
+    if (confirm("Clear chat history? (Documents will remain indexed)")) {
+      setMessages([])
+    }
+  }
+
   return (
-    <Card className="border-border/50">
-      <CardHeader>
+    <Card className="border-border/50 flex flex-col h-[600px]">
+      <CardHeader className="flex-shrink-0">
         <CardTitle className="flex items-center gap-2">
           <MessageSquare className="h-5 w-5 text-primary" />
           Chat with Your Knowledge Base
         </CardTitle>
         <CardDescription>Ask questions about your uploaded documents and indexed URLs</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2">
+
+      <CardContent className="flex-1 flex flex-col min-h-0 space-y-4">
+        {/* No documents warning */}
+        {!hasDocuments && (
+          <div className="flex items-center gap-3 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-4">
+            <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
+            <div>
+              <p className="font-medium text-yellow-500">No documents indexed</p>
+              <p className="text-sm text-muted-foreground">
+                Upload a PDF/TXT file or index a URL above to start chatting.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Messages area */}
+        <div className="flex-1 overflow-y-auto rounded-lg border border-border/50 bg-muted/20 p-4 space-y-4 min-h-[200px]">
+          {messages.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-muted-foreground">
+              <div className="text-center">
+                <MessageSquare className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                <p>{hasDocuments ? "Start a conversation..." : "Index some documents to begin"}</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={cn(
+                    "flex gap-3",
+                    message.role === "user" ? "justify-end" : "justify-start",
+                    message.role === "system" && "justify-center"
+                  )}
+                >
+                  {/* System message - centered with info icon */}
+                  {message.role === "system" && (
+                    <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-2 max-w-[90%]">
+                      <Info className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                      <p className="text-sm text-blue-600 dark:text-blue-400">{message.content}</p>
+                    </div>
+                  )}
+
+                  {message.role === "assistant" && (
+                    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                      <Bot className="h-4 w-4 text-primary" />
+                    </div>
+                  )}
+
+                  {message.role !== "system" && (
+                  <div
+                    className={cn(
+                      "max-w-[80%] rounded-lg p-3 space-y-2",
+                      message.role === "user"
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-card border border-border/50"
+                    )}
+                  >
+                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+
+                    {/* Sources for assistant messages */}
+                    {message.role === "assistant" && message.sources && message.sources.length > 0 && (
+                      <div className="pt-2 border-t border-border/30 space-y-2">
+                        <p className="text-xs font-medium flex items-center gap-1 text-muted-foreground">
+                          <FileText className="h-3 w-3" />
+                          Sources ({message.sources.length})
+                        </p>
+                        <div className="space-y-1">
+                          {message.sources.map((source, idx) => (
+                            <div key={idx} className="text-xs bg-muted/50 rounded p-2">
+                              <p className="text-muted-foreground line-clamp-2">{source.preview}</p>
+                              <a
+                                href={source.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline mt-1 inline-block"
+                              >
+                                {source.url.length > 50 ? source.url.substring(0, 50) + "..." : source.url}
+                              </a>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <p className="text-xs opacity-50">
+                      {message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </p>
+                  </div>
+                  )}
+
+                  {message.role === "user" && (
+                    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                      <User className="h-4 w-4 text-primary-foreground" />
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* Loading indicator */}
+              {loading && (
+                <div className="flex gap-3 justify-start">
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                    <Bot className="h-4 w-4 text-primary" />
+                  </div>
+                  <div className="bg-card border border-border/50 rounded-lg p-3">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Thinking...
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </>
+          )}
+        </div>
+
+        {/* Error display */}
+        {error && <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
+
+        {/* Input area */}
+        <div className="flex-shrink-0 space-y-2">
           <Textarea
-            placeholder="Ask a question about your documents..."
+            placeholder={hasDocuments ? "Ask a question about your documents..." : "Index documents first..."}
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            disabled={loading}
-            className="min-h-[100px] resize-none bg-background"
+            disabled={loading || !hasDocuments}
+            className="min-h-[80px] resize-none bg-background"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault()
@@ -73,62 +270,39 @@ export function ChatSection() {
               }
             }}
           />
-        </div>
 
-        <div className="flex gap-2">
-          <Button onClick={handleAsk} disabled={loading || !question.trim()} className="flex-1">
-            {loading ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Thinking...
-              </>
-            ) : (
-              <>
-                <Send className="mr-2 h-4 w-4" />
-                Ask
-              </>
-            )}
-          </Button>
-          <Button onClick={handleReset} disabled={loading} variant="outline">
-            <RotateCcw className="mr-2 h-4 w-4" />
-            Reset
-          </Button>
-        </div>
-
-        {error && <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">{error}</div>}
-
-        {response && (
-          <div className="space-y-4 rounded-lg border border-border/50 bg-muted/30 p-4">
-            <div className="space-y-2">
-              <h3 className="font-semibold text-foreground">Answer</h3>
-              <p className="text-pretty leading-relaxed text-foreground">{response.answer}</p>
-            </div>
-
-            {response.sources && response.sources.length > 0 && (
-              <div className="space-y-2 border-t border-border/50 pt-4">
-                <h3 className="flex items-center gap-2 font-semibold text-foreground">
-                  <FileText className="h-4 w-4" />
-                  Sources ({response.sources.length})
-                </h3>
-                <div className="space-y-2">
-                  {response.sources.map((source, idx) => (
-                    <div key={idx} className="rounded-md border border-border/30 bg-card/50 p-3 text-sm space-y-2">
-                      <p className="text-pretty leading-relaxed text-card-foreground">{source.preview}</p>
-                      <a
-                        href={source.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center text-xs text-primary hover:underline"
-                      >
-                        {source.url}
-                      </a>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+          <div className="flex gap-2">
+            <Button
+              onClick={handleAsk}
+              disabled={loading || !question.trim() || !hasDocuments}
+              className="flex-1"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Sending...
+                </>
+              ) : (
+                <>
+                  <Send className="mr-2 h-4 w-4" />
+                  Send
+                </>
+              )}
+            </Button>
+            <Button
+              onClick={handleClearChat}
+              disabled={loading || messages.length === 0}
+              variant="outline"
+              title="Clear chat history"
+            >
+              Clear
+            </Button>
+            <Button onClick={handleReset} disabled={loading} variant="destructive" title="Delete all documents">
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Reset
+            </Button>
           </div>
-        )}
+        </div>
       </CardContent>
     </Card>
   )

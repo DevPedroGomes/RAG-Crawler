@@ -1,36 +1,14 @@
-"use client"
+import { auth } from "@clerk/nextjs/server"
+import { redirect } from "next/navigation"
+import { UserButton } from "@clerk/nextjs"
+import { Brain } from "lucide-react"
+import { DashboardContent } from "@/components/dashboard-content"
 
-import { useEffect } from "react"
-import { useRouter } from "next/navigation"
-import { Button } from "@/components/ui/button"
-import { UploadSection } from "@/components/upload-section"
-import { ChatSection } from "@/components/chat-section"
-import { isAuthenticated, clearToken } from "@/lib/auth"
-import { api } from "@/lib/api"
-import { Brain, LogOut } from "lucide-react"
+export default async function DashboardPage() {
+  const { userId } = await auth()
 
-export default function DashboardPage() {
-  const router = useRouter()
-
-  useEffect(() => {
-    if (!isAuthenticated()) {
-      router.push("/")
-    }
-  }, [router])
-
-  const handleLogout = async () => {
-    try {
-      await api.logout()
-    } catch (err) {
-      console.error("Logout error:", err)
-    } finally {
-      clearToken()
-      router.push("/")
-    }
-  }
-
-  if (!isAuthenticated()) {
-    return null
+  if (!userId) {
+    redirect("/sign-in")
   }
 
   return (
@@ -46,10 +24,7 @@ export default function DashboardPage() {
               <p className="text-xs text-muted-foreground">AI Knowledge Base</p>
             </div>
           </div>
-          <Button onClick={handleLogout} variant="outline" size="sm">
-            <LogOut className="mr-2 h-4 w-4" />
-            Sign out
-          </Button>
+          <UserButton afterSignOutUrl="/" />
         </div>
       </header>
 
@@ -61,8 +36,7 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        <UploadSection />
-        <ChatSection />
+        <DashboardContent />
       </main>
     </div>
   )

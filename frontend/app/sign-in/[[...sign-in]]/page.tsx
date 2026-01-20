@@ -1,16 +1,7 @@
-import { auth } from "@clerk/nextjs/server"
-import { redirect } from "next/navigation"
+import { SignIn } from "@clerk/nextjs"
 import { Brain } from "lucide-react"
-import Link from "next/link"
-import { Button } from "@/components/ui/button"
 
-export default async function HomePage() {
-  const { userId } = await auth()
-
-  if (userId) {
-    redirect("/dashboard")
-  }
-
+export default function SignInPage() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/20 via-background to-background" />
@@ -25,18 +16,11 @@ export default async function HomePage() {
           RAG Knowledge Assistant
         </h1>
         <p className="text-lg text-muted-foreground text-balance">
-          Upload documents, index URLs, and chat with your AI-powered knowledge base
+          Sign in to access your AI-powered knowledge base
         </p>
       </div>
 
-      <div className="flex gap-4">
-        <Button asChild>
-          <Link href="/sign-in">Sign In</Link>
-        </Button>
-        <Button asChild variant="outline">
-          <Link href="/sign-up">Sign Up</Link>
-        </Button>
-      </div>
+      <SignIn />
     </main>
   )
 }

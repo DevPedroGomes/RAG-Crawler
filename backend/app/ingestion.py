@@ -1,44 +1,48 @@
-from typing import List, Dict
+from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document
 from .config import settings
-from .pinecone_client import get_index
-import hashlib
+from .pgvector_store import get_vector_store
 from PyPDF2 import PdfReader
 
-def _chunks(text: str):
+
+def _chunks(text: str) -> List[str]:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP, add_start_index=True
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+        add_start_index=True
     )
     return splitter.split_text(text)
 
-def _hash(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
-def _to_vectors(text: str, source: str) -> List[Dict]:
-    out = []
-    for ch in _chunks(text):
-        id_ = _hash(source + ch)
-        out.append({"id": id_, "values": None, "metadata": {"source": source, "text": ch}})
-    return out
+def _to_documents(text: str, source: str) -> List[Document]:
+    """Convert text to LangChain Documents with metadata."""
+    docs = []
+    for chunk in _chunks(text):
+        docs.append(Document(
+            page_content=chunk,
+            metadata={"source": source}
+        ))
+    return docs
 
-def embed_and_upsert(vectors: List[Dict], namespace: str):
-    if not vectors:
+
+def embed_and_store(documents: List[Document], user_id: str):
+    """Embed documents and store in PGVector."""
+    if not documents:
         return
-    texts = [v["metadata"]["text"] for v in vectors]
-    emb = OpenAIEmbeddings(model=settings.EMBEDDING_MODEL, api_key=settings.OPENAI_API_KEY)
-    embs = emb.embed_documents(texts)
-    for v, e in zip(vectors, embs):
-        v["values"] = e
-    index = get_index()
-    index.upsert(vectors=vectors, namespace=namespace)
+    vs = get_vector_store(user_id)
+    vs.add_documents(documents)
 
-def ingest_pdf(file_path: str, source: str, namespace: str):
+
+def ingest_pdf(file_path: str, source: str, user_id: str):
+    """Ingest a PDF file into the vector store."""
     reader = PdfReader(file_path)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
-    vectors = _to_vectors(text, source)
-    embed_and_upsert(vectors, namespace)
+    documents = _to_documents(text, source)
+    embed_and_store(documents, user_id)
 
-def ingest_txt(text: str, source: str, namespace: str):
-    vectors = _to_vectors(text, source)
-    embed_and_upsert(vectors, namespace)
+
+def ingest_txt(text: str, source: str, user_id: str):
+    """Ingest plain text into the vector store."""
+    documents = _to_documents(text, source)
+    embed_and_store(documents, user_id)
