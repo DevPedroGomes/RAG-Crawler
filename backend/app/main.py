@@ -71,14 +71,20 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configurar CORS para Clerk JWT auth
-# IMPORTANTE: Em produção, especifique os origins exatos
+cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://ragcrawler.pgdev.com.br",
+]
+# Permite adicionar origins extras via env var (comma-separated)
+import os
+extra_origins = os.getenv("CORS_ORIGINS", "")
+if extra_origins:
+    cors_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        # Adicione seus domínios de produção aqui
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],  # Bearer token
@@ -98,7 +104,7 @@ async def security_headers(request: Request, call_next):
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
         "font-src 'self' data:; "
-        "connect-src 'self' http://localhost:5173 http://localhost:3000; "
+        "connect-src 'self' http://localhost:5173 http://localhost:3000 https://ragcrawler.pgdev.com.br; "
         "frame-ancestors 'none';"
     )
 

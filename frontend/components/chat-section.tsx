@@ -67,11 +67,13 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
     setLoading(true)
 
     try {
-      // Send chat history along with the question
-      const chatHistory = messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }))
+      // Send chat history along with the question (exclude system messages)
+      const chatHistory = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }))
 
       const result = await api.ask(question.trim(), chatHistory)
 

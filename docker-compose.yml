@@ -1,0 +1,131 @@
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ragcrawler-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ragcrawler}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-ragdb}
+    volumes:
+      - ragcrawler_pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ragcrawler} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for session storage and job queue
+  redis:
+    image: redis:7-alpine
+    container_name: ragcrawler-redis
+    restart: unless-stopped
+    volumes:
+      - ragcrawler_redis:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend (FastAPI + Playwright)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ragcrawler-backend
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ragcrawler}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ragdb}
+      REDIS_URL: redis://redis:6379/0
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL:-}
+      CLERK_AUTHORIZED_PARTIES: https://ragcrawler.pgdev.com.br
+      ENVIRONMENT: production
+      LOG_LEVEL: INFO
+      HEADLESS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # RQ Worker — processes background jobs (file indexing, URL crawling)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ragcrawler-worker
+    restart: unless-stopped
+    command: ["python", "-m", "rq.cli", "worker", "--url", "redis://redis:6379/0", "default"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ragcrawler}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ragdb}
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+      LOG_LEVEL: INFO
+      HEADLESS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # Frontend (Next.js) — exposed via Traefik
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+        NEXT_PUBLIC_API_URL: /api
+        BACKEND_INTERNAL_URL: http://backend:8000
+    container_name: ragcrawler-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+      BACKEND_INTERNAL_URL: http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - internal
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ragcrawler.entrypoints=https"
+      - "traefik.http.routers.ragcrawler.rule=Host(`ragcrawler.pgdev.com.br`)"
+      - "traefik.http.routers.ragcrawler.tls=true"
+      - "traefik.http.routers.ragcrawler.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.ragcrawler.middlewares=ragcrawler-security@docker"
+      - "traefik.http.services.ragcrawler.loadbalancer.server.port=3000"
+      # Security Headers
+      - "traefik.http.middlewares.ragcrawler-security.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.ragcrawler-security.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.ragcrawler-security.headers.stsPreload=true"
+      - "traefik.http.middlewares.ragcrawler-security.headers.forceSTSHeader=true"
+      - "traefik.http.middlewares.ragcrawler-security.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.ragcrawler-security.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.ragcrawler-security.headers.referrerPolicy=strict-origin-when-cross-origin"
+      - "traefik.http.middlewares.ragcrawler-security.headers.frameDeny=true"
+
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: bridge
+
+volumes:
+  ragcrawler_pgdata:
+    driver: local
+  ragcrawler_redis:
+    driver: local

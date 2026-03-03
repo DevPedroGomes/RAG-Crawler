@@ -8,6 +8,7 @@ Features:
 - Chat History: Maintains conversation context
 """
 import logging
+from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
@@ -16,6 +17,16 @@ from .config import settings
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _get_llm() -> ChatOpenAI:
+    """Get cached LLM instance (singleton)."""
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.1,
+        api_key=settings.OPENAI_API_KEY
+    )
 
 # System prompt for the RAG assistant
 _SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on the provided context from the user's documents.
@@ -43,8 +54,7 @@ def _format_docs(docs):
     parts = []
     for d in docs:
         src = d.metadata.get("source", "")
-        txt = d.page_content[:500] + ("…" if len(d.page_content) > 500 else "")
-        parts.append(f"- {txt}\n  Source: {src}")
+        parts.append(f"- {d.page_content}\n  Source: {src}")
     return "\n\n".join(parts) if parts else "No relevant documents found."
 
 
@@ -112,12 +122,8 @@ def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = Non
     # Convert chat history to LangChain format
     history_messages = _convert_chat_history(chat_history)
 
-    # Create LLM and generate response
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.1,  # Slight temperature for more natural responses
-        api_key=settings.OPENAI_API_KEY
-    )
+    # Get cached LLM and generate response
+    llm = _get_llm()
 
     # Format prompt with context and history
     prompt_messages = _PROMPT.format_messages(
