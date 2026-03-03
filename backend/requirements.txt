@@ -40,3 +40,6 @@ slowapi==0.1.9
 
 # Background tasks
 apscheduler==3.10.4
+
+# Structured logging
+python-json-logger==2.0.7

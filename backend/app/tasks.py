@@ -10,6 +10,7 @@ import logging
 import asyncio
 from rq import Queue, Retry
 from redis import Redis
+from openai import RateLimitError, APIConnectionError, APITimeoutError
 from .config import settings
 from .ingestion import ingest_pdf, ingest_txt
 
@@ -51,9 +52,16 @@ def process_file_task(file_path: str, filename: str, is_pdf: bool, user_id: str)
         logger.info(f"Successfully processed file '{filename}' for user {user_id}")
         return {"status": "completed", "message": f"Document '{filename}' indexed successfully"}
 
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit processing '{filename}': {e}")
+        raise  # RQ will retry with backoff
+
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI unavailable processing '{filename}': {e}")
+        raise  # RQ will retry with backoff
+
     except Exception as e:
         logger.error(f"Error processing file '{filename}' for user {user_id}: {e}")
-        # Re-raise to trigger retry
         raise
 
     finally:
@@ -93,9 +101,16 @@ def process_url_task(url: str, user_id: str) -> dict:
         logger.info(f"Successfully processed URL '{url}' for user {user_id}")
         return {"status": "completed", "message": f"URL '{url}' indexed successfully"}
 
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit processing '{url}': {e}")
+        raise  # RQ will retry with backoff
+
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI unavailable processing '{url}': {e}")
+        raise  # RQ will retry with backoff
+
     except Exception as e:
         logger.error(f"Error processing URL '{url}' for user {user_id}: {e}")
-        # Re-raise to trigger retry
         raise
 
 

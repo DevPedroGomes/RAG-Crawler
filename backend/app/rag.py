@@ -6,12 +6,14 @@ Features:
 - Embedding Cache: Reduces OpenAI API calls for repeated queries
 - MMR Fallback: Uses Maximal Marginal Relevance if hybrid unavailable
 - Chat History: Maintains conversation context
+- Graceful degradation when OpenAI is unavailable
 """
 import logging
 from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
+from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 from .pgvector_store import search_documents, get_vector_store
 from .config import settings
 from typing import List, Optional
@@ -105,14 +107,24 @@ def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = Non
         dict with answer and sources
     """
     # Get relevant documents using HYBRID SEARCH (semantic + keyword)
-    # This uses embedding cache internally to reduce API calls
-    # Hybrid search is controlled by ENABLE_HYBRID_SEARCH setting
-    docs = search_documents(
-        query=question,
-        user_id=user_id,
-        top_k=settings.TOP_K,
-        # use_hybrid defaults to settings.ENABLE_HYBRID_SEARCH
-    )
+    try:
+        docs = search_documents(
+            query=question,
+            user_id=user_id,
+            top_k=settings.TOP_K,
+        )
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI embedding search failed: {e}")
+        return {
+            "answer": "I'm unable to search your documents right now because the AI service is temporarily unavailable. Please try again in a moment.",
+            "sources": [],
+        }
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit hit during search: {e}")
+        return {
+            "answer": "The AI service is currently rate-limited. Please wait a moment and try again.",
+            "sources": [],
+        }
 
     logger.debug(f"Retrieved {len(docs)} documents for query: {question[:50]}...")
 
@@ -132,7 +144,26 @@ def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = Non
         question=question
     )
 
-    out = llm.invoke(prompt_messages)
+    try:
+        out = llm.invoke(prompt_messages)
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit hit during LLM call: {e}")
+        return {
+            "answer": "The AI service is currently rate-limited. Please wait a moment and try again.",
+            "sources": [],
+        }
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI LLM unavailable: {e}")
+        return {
+            "answer": "The AI service is temporarily unavailable. Please try again in a moment.",
+            "sources": [],
+        }
+    except APIError as e:
+        logger.error(f"OpenAI API error: {e}")
+        return {
+            "answer": "An error occurred while generating the response. Please try again.",
+            "sources": [],
+        }
 
     # Extract sources from retrieved documents
     sources = []

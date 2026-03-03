@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -16,11 +17,21 @@ from .background import start_background_tasks, stop_background_tasks
 from .crawler import BrowserPool
 from .pgvector_store import init_pgvector
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Configure logging — JSON in production, plaintext in dev
+if settings.ENVIRONMENT == "production":
+    from pythonjsonlogger import jsonlogger
+    handler = logging.StreamHandler()
+    handler.setFormatter(jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level"},
+    ))
+    logging.root.handlers = [handler]
+    logging.root.setLevel(getattr(logging, settings.LOG_LEVEL))
+else:
+    logging.basicConfig(
+        level=getattr(logging, settings.LOG_LEVEL),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
 logger = logging.getLogger(__name__)
 
 # Cria as tabelas do banco de dados
@@ -71,14 +82,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configurar CORS para Clerk JWT auth
-cors_origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://ragcrawler.pgdev.com.br",
-]
-# Permite adicionar origins extras via env var (comma-separated)
-import os
-extra_origins = os.getenv("CORS_ORIGINS", "")
+cors_origins = ["https://ragcrawler.pgdev.com.br"]
+# Dev/extra origins via env var (comma-separated), e.g. CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+extra_origins = os.environ.get("CORS_ORIGINS", "")
 if extra_origins:
     cors_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
 
@@ -96,15 +102,9 @@ app.add_middleware(
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
 
-    # Content Security Policy
-    # NOTA: Ajuste conforme necessário para seu frontend
+    # Content Security Policy — strict for API-only backend
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "  # Ajuste em produção
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; "
-        "font-src 'self' data:; "
-        "connect-src 'self' http://localhost:5173 http://localhost:3000 https://ragcrawler.pgdev.com.br; "
+        "default-src 'none'; "
         "frame-ancestors 'none';"
     )
 
@@ -134,12 +134,19 @@ async def security_headers(request: Request, call_next):
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
-    process_time = time.time() - start_time
+    duration_ms = (time.time() - start_time) * 1000
 
     # Skip logging health checks to reduce noise
     if request.url.path != "/health":
         logger.info(
-            f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s"
+            "request",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": round(duration_ms, 1),
+                "client_ip": request.client.host if request.client else None,
+            },
         )
 
     return response
@@ -194,6 +201,22 @@ def health():
     except Exception as e:
         health_status["checks"]["redis"] = f"error: {str(e)}"
         health_status["status"] = "unhealthy"
+
+    # Check RQ Worker status
+    try:
+        from rq import Queue
+        redis_conn = Redis.from_url(settings.REDIS_URL)
+        q = Queue('default', connection=redis_conn)
+        workers = q.workers
+        health_status["checks"]["worker"] = {
+            "active_workers": len(workers),
+            "queued_jobs": q.count,
+            "failed_jobs": q.failed_job_registry.count,
+        }
+        if len(workers) == 0:
+            health_status["checks"]["worker"]["warning"] = "no active workers"
+    except Exception as e:
+        health_status["checks"]["worker"] = f"error: {str(e)}"
 
     # Check OpenAI API key is configured
     health_status["checks"]["openai_configured"] = "ok" if settings.OPENAI_API_KEY else "not configured"
