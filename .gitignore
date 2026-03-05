@@ -43,3 +43,4 @@ yarn-error.log*
 
 # Markdown files
 *.md
+!README.md
