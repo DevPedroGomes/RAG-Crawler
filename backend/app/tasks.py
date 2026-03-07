@@ -6,13 +6,14 @@ freeing the API to respond immediately.
 """
 
 import os
+import json
 import logging
 import asyncio
-from rq import Queue, Retry
+from rq import Queue, Retry, get_current_job
 from redis import Redis
 from openai import RateLimitError, APIConnectionError, APITimeoutError
 from .config import settings
-from .ingestion import ingest_pdf, ingest_txt
+from .ingestion import ingest_pdf, ingest_txt, ingest_pdf_with_progress, ingest_txt_with_progress
 
 logger = logging.getLogger(__name__)
 
@@ -26,88 +27,105 @@ task_queue = Queue('default', connection=redis_conn)
 DEFAULT_RETRY = Retry(max=3, interval=[10, 60, 300])  # 10s, 1min, 5min
 
 
+def _publish_progress(job_id: str, step: str, detail: str = ""):
+    """Publish a pipeline progress step to Redis for real-time UI updates."""
+    try:
+        key = f"job_progress:{job_id}"
+        entry = json.dumps({"step": step, "detail": detail})
+        redis_conn.rpush(key, entry)
+        redis_conn.expire(key, 600)  # 10 min TTL
+    except Exception:
+        pass
+
+
 def process_file_task(file_path: str, filename: str, is_pdf: bool, user_id: str) -> dict:
-    """
-    Background task for processing uploaded files.
-
-    Args:
-        file_path: Path to the temporary file
-        filename: Original filename
-        is_pdf: Whether the file is a PDF
-        user_id: User ID for PGVector collection
-
-    Returns:
-        dict with status and message
-    """
+    """Background task for processing uploaded files with progress tracking."""
+    job = get_current_job()
+    job_id = job.id if job else "unknown"
     logger.info(f"Processing file '{filename}' for user {user_id}")
 
     try:
+        _publish_progress(job_id, "extracting", f"Extracting text from {filename}")
+
         if is_pdf:
-            ingest_pdf(file_path, source=filename, user_id=user_id)
+            result = ingest_pdf_with_progress(
+                file_path, source=filename, user_id=user_id,
+                on_progress=lambda step, detail: _publish_progress(job_id, step, detail),
+            )
         else:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
-            ingest_txt(text, source=filename, user_id=user_id)
+            _publish_progress(job_id, "extracted", f"{len(text.split())} words extracted")
+            result = ingest_txt_with_progress(
+                text, source=filename, user_id=user_id,
+                on_progress=lambda step, detail: _publish_progress(job_id, step, detail),
+            )
 
+        _publish_progress(job_id, "completed", "Indexing complete")
         logger.info(f"Successfully processed file '{filename}' for user {user_id}")
-        return {"status": "completed", "message": f"Document '{filename}' indexed successfully"}
+        return {
+            "status": "completed",
+            "message": f"Document '{filename}' indexed successfully",
+            **result,
+        }
 
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit processing '{filename}': {e}")
-        raise  # RQ will retry with backoff
+        raise
 
     except (APIConnectionError, APITimeoutError) as e:
         logger.error(f"OpenAI unavailable processing '{filename}': {e}")
-        raise  # RQ will retry with backoff
+        raise
 
     except Exception as e:
         logger.error(f"Error processing file '{filename}' for user {user_id}: {e}")
         raise
 
     finally:
-        # Clean up temporary file
         if os.path.exists(file_path):
             os.unlink(file_path)
             logger.debug(f"Cleaned up temporary file: {file_path}")
 
 
 def process_url_task(url: str, user_id: str) -> dict:
-    """
-    Background task for crawling and indexing URLs.
-
-    Args:
-        url: URL to crawl
-        user_id: User ID for PGVector collection
-
-    Returns:
-        dict with status and message
-    """
+    """Background task for crawling and indexing URLs with progress tracking."""
+    job = get_current_job()
+    job_id = job.id if job else "unknown"
     logger.info(f"Processing URL '{url}' for user {user_id}")
 
     try:
-        # Import here to avoid circular imports
         from .crawler import render_urls
 
-        # Run async crawler in sync context
+        _publish_progress(job_id, "crawling", f"Rendering page with headless browser")
         docs = asyncio.run(render_urls([url]))
         text = "\n".join(d["page_content"] for d in docs)
 
         if not text.strip():
+            _publish_progress(job_id, "failed", "No content extracted")
             logger.warning(f"No content extracted from URL '{url}'")
             return {"status": "failed", "message": "No content extracted from URL"}
 
-        ingest_txt(text, source=url, user_id=user_id)
+        _publish_progress(job_id, "extracted", f"{len(text.split())} words extracted")
+        result = ingest_txt_with_progress(
+            text, source=url, user_id=user_id,
+            on_progress=lambda step, detail: _publish_progress(job_id, step, detail),
+        )
 
+        _publish_progress(job_id, "completed", "Indexing complete")
         logger.info(f"Successfully processed URL '{url}' for user {user_id}")
-        return {"status": "completed", "message": f"URL '{url}' indexed successfully"}
+        return {
+            "status": "completed",
+            "message": f"URL '{url}' indexed successfully",
+            **result,
+        }
 
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit processing '{url}': {e}")
-        raise  # RQ will retry with backoff
+        raise
 
     except (APIConnectionError, APITimeoutError) as e:
         logger.error(f"OpenAI unavailable processing '{url}': {e}")
-        raise  # RQ will retry with backoff
+        raise
 
     except Exception as e:
         logger.error(f"Error processing URL '{url}' for user {user_id}: {e}")
@@ -213,9 +231,18 @@ def get_job_status(job_id: str, user_id: str | None = None) -> dict:
     elif status == "failed":
         error = str(job.exc_info) if job.exc_info else "Unknown error"
 
+    # Fetch pipeline progress steps
+    progress = []
+    try:
+        raw_steps = redis_conn.lrange(f"job_progress:{job_id}", 0, -1)
+        progress = [json.loads(s) for s in raw_steps]
+    except Exception:
+        pass
+
     return {
         "job_id": job_id,
         "status": status,
         "result": result,
-        "error": error
+        "error": error,
+        "progress": progress,
     }

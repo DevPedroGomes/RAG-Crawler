@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react"
 import { useAuth } from "@clerk/nextjs"
 import { UploadSection } from "@/components/upload-section"
 import { ChatSection } from "@/components/chat-section"
+import { AnalysisPanel } from "@/components/analysis-panel"
 import { api, type DocumentCountResponse } from "@/lib/api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Clock } from "lucide-react"
@@ -14,12 +15,10 @@ export function DashboardContent() {
   const [isCheckingDocuments, setIsCheckingDocuments] = useState(true)
   const [systemMessage, setSystemMessage] = useState<{ id: string; content: string } | null>(null)
 
-  // Set up API client with Clerk token getter
   useEffect(() => {
     api.setTokenGetter(getToken)
   }, [getToken])
 
-  // Check if user has documents
   const checkDocuments = useCallback(async () => {
     try {
       setIsCheckingDocuments(true)
@@ -33,9 +32,7 @@ export function DashboardContent() {
     }
   }, [])
 
-  // Initial check for documents
   useEffect(() => {
-    // Small delay to ensure token getter is set
     const timer = setTimeout(() => {
       checkDocuments()
     }, 100)
@@ -49,7 +46,6 @@ export function DashboardContent() {
 
   return (
     <>
-      {/* Showcase mode warning */}
       <Alert className="mb-6 border-amber-500/50 bg-amber-500/10">
         <Clock className="h-4 w-4 text-amber-500" />
         <AlertTitle className="text-amber-500">Showcase Mode</AlertTitle>
@@ -79,6 +75,7 @@ export function DashboardContent() {
         onReset={checkDocuments}
         systemMessage={systemMessage}
       />
+      <AnalysisPanel hasDocuments={hasDocuments && !isCheckingDocuments} />
     </>
   )
 }

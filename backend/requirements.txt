@@ -43,3 +43,6 @@ apscheduler==3.10.4
 
 # Structured logging
 python-json-logger==2.0.7
+
+# Numerical computation (PCA for embedding visualization)
+numpy>=1.26.0,<2.0.0

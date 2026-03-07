@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { api } from "@/lib/api"
-import { Upload, Link2, Loader2, CheckCircle2, Clock, XCircle, FileText } from "lucide-react"
+import { api, type ProgressStep } from "@/lib/api"
+import { Upload, Link2, Loader2, CheckCircle2, Clock, XCircle, FileText, Cpu, Scissors, Database, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface UploadSectionProps {
@@ -23,6 +23,44 @@ interface FileUploadStatus {
   name: string
   status: "uploading" | "processing" | "completed" | "failed"
   message?: string
+  progress?: ProgressStep[]
+}
+
+const STEP_ICONS: Record<string, typeof Cpu> = {
+  extracting: FileText,
+  extracted: FileText,
+  crawling: Search,
+  chunking: Scissors,
+  embedding: Cpu,
+  stored: Database,
+  completed: CheckCircle2,
+}
+
+function PipelineSteps({ steps }: { steps: ProgressStep[] }) {
+  if (!steps || steps.length === 0) return null
+
+  return (
+    <div className="mt-2 space-y-1 border-l-2 border-primary/30 pl-3">
+      {steps.map((step, i) => {
+        const Icon = STEP_ICONS[step.step] || Loader2
+        const isLast = i === steps.length - 1
+        return (
+          <div key={i} className="flex items-center gap-2 text-xs">
+            <Icon className={cn(
+              "h-3 w-3 flex-shrink-0",
+              isLast ? "text-primary animate-pulse" : "text-green-500"
+            )} />
+            <span className={cn(
+              "font-mono",
+              isLast ? "text-foreground" : "text-muted-foreground"
+            )}>
+              {step.detail}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export function UploadSection({
@@ -37,6 +75,7 @@ export function UploadSection({
   const [urlProcessing, setUrlProcessing] = useState(false)
   const [url, setUrl] = useState("")
   const [urlSuccess, setUrlSuccess] = useState("")
+  const [urlProgress, setUrlProgress] = useState<ProgressStep[]>([])
   const [error, setError] = useState("")
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -51,30 +90,30 @@ export function UploadSection({
     setError("")
     setIsUploading(true)
 
-    // Initialize status for all files
     const initialStatuses: FileUploadStatus[] = Array.from(files).map(file => ({
       id: crypto.randomUUID(),
       name: file.name,
-      status: "uploading"
+      status: "uploading",
+      progress: [],
     }))
     setFileStatuses(initialStatuses)
 
-    // Process files in parallel
     const uploadPromises = Array.from(files).map(async (file, index) => {
       const fileId = initialStatuses[index].id
 
       try {
-        // Upload file
         const jobResponse = await api.uploadFile(file)
         updateFileStatus(fileId, { status: "processing" })
 
-        // Wait for processing
-        const result = await api.waitForJob(jobResponse.job_id)
+        const result = await api.waitForJob(jobResponse.job_id, 2000, 60, (steps) => {
+          updateFileStatus(fileId, { progress: steps })
+        })
 
         if (result.status === "finished" && result.result?.status === "completed") {
           updateFileStatus(fileId, {
             status: "completed",
-            message: result.result.message || "Indexed successfully"
+            message: result.result.message || "Indexed successfully",
+            progress: result.progress,
           })
           return true
         } else {
@@ -116,19 +155,21 @@ export function UploadSection({
 
     setError("")
     setUrlSuccess("")
+    setUrlProgress([])
     setUrlLoading(true)
 
     try {
-      // Queue URL for processing
       const jobResponse = await api.crawlUrl(url)
       setUrlLoading(false)
       setUrlProcessing(true)
 
-      // Poll for job completion
-      const result = await api.waitForJob(jobResponse.job_id)
+      const result = await api.waitForJob(jobResponse.job_id, 2000, 60, (steps) => {
+        setUrlProgress(steps)
+      })
 
       if (result.status === "finished" && result.result?.status === "completed") {
         setUrlSuccess(result.result.message || "URL indexed successfully")
+        setUrlProgress(result.progress || [])
         const indexedUrl = url
         setUrl("")
         onUploadComplete?.([indexedUrl])
@@ -161,7 +202,6 @@ export function UploadSection({
           <CardDescription>Upload multiple PDF or TXT files to your knowledge base</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Document limit indicator */}
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground">Documents used:</span>
             <span className={cn(
@@ -193,40 +233,44 @@ export function UploadSection({
             <p className="text-xs text-muted-foreground">Max 5MB per file. You can select multiple files.</p>
           </div>
 
-          {/* File upload statuses */}
           {fileStatuses.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">Upload Progress</span>
+                <span className="text-sm font-medium">Pipeline Progress</span>
                 {hasCompletedUploads && (
                   <Button variant="ghost" size="sm" onClick={clearFileStatuses} className="h-6 text-xs">
                     Clear
                   </Button>
                 )}
               </div>
-              <div className="space-y-1 max-h-[200px] overflow-y-auto">
+              <div className="space-y-1 max-h-[300px] overflow-y-auto">
                 {fileStatuses.map(file => (
                   <div
                     key={file.id}
                     className={cn(
-                      "flex items-center gap-2 text-sm p-2 rounded-md",
+                      "text-sm p-2 rounded-md",
                       file.status === "completed" && "bg-green-500/10",
                       file.status === "failed" && "bg-destructive/10",
                       (file.status === "uploading" || file.status === "processing") && "bg-muted"
                     )}
                   >
-                    {file.status === "uploading" && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
-                    {file.status === "processing" && <Clock className="h-4 w-4 animate-pulse text-primary" />}
-                    {file.status === "completed" && <CheckCircle2 className="h-4 w-4 text-green-500" />}
-                    {file.status === "failed" && <XCircle className="h-4 w-4 text-destructive" />}
-                    <FileText className="h-4 w-4 text-muted-foreground" />
-                    <span className="flex-1 truncate">{file.name}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {file.status === "uploading" && "Uploading..."}
-                      {file.status === "processing" && "Processing..."}
-                      {file.status === "completed" && "Done"}
-                      {file.status === "failed" && "Failed"}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {file.status === "uploading" && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+                      {file.status === "processing" && <Clock className="h-4 w-4 animate-pulse text-primary" />}
+                      {file.status === "completed" && <CheckCircle2 className="h-4 w-4 text-green-500" />}
+                      {file.status === "failed" && <XCircle className="h-4 w-4 text-destructive" />}
+                      <FileText className="h-4 w-4 text-muted-foreground" />
+                      <span className="flex-1 truncate">{file.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {file.status === "uploading" && "Uploading..."}
+                        {file.status === "processing" && "Processing..."}
+                        {file.status === "completed" && "Done"}
+                        {file.status === "failed" && "Failed"}
+                      </span>
+                    </div>
+                    {file.progress && file.progress.length > 0 && (
+                      <PipelineSteps steps={file.progress} />
+                    )}
                   </div>
                 ))}
               </div>
@@ -277,6 +321,9 @@ export function UploadSection({
                 "Index URL"
               )}
             </Button>
+            {(urlProcessing || urlProgress.length > 0) && (
+              <PipelineSteps steps={urlProgress} />
+            )}
             {urlSuccess && (
               <div className="flex items-center gap-2 text-sm text-green-500">
                 <CheckCircle2 className="h-4 w-4" />

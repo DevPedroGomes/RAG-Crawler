@@ -1,8 +1,9 @@
 import logging
 from fastapi import APIRouter, HTTPException, Body, Request, Depends
+from fastapi.responses import StreamingResponse
 from ..security import require_auth
 from ..schemas import ChatIn, DocumentCountOut
-from ..rag import answer
+from ..rag import answer, answer_stream
 from ..pgvector_store import delete_user_documents, get_document_count, get_unique_source_count
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -70,6 +71,41 @@ def ask(
     except Exception as e:
         logger.error(f"Error processing question: {e}")
         raise HTTPException(500, "Error processing your question. Please try again.")
+
+
+@router.post("/ask/stream")
+@limiter.limit("20/minute")
+def ask_stream(
+    request: Request,
+    payload: ChatIn = Body(...),
+    user_id: str = Depends(require_auth)
+):
+    """
+    Stream an answer from the RAG system via Server-Sent Events.
+
+    Events:
+      - sources: JSON array of source objects (sent first)
+      - token: text chunk from the LLM
+      - done: signals stream is complete
+      - error: error message
+    """
+    chat_history = None
+    if payload.chat_history:
+        chat_history = [{"role": m.role, "content": m.content} for m in payload.chat_history]
+
+    return StreamingResponse(
+        answer_stream(
+            question=payload.question,
+            user_id=user_id,
+            chat_history=chat_history,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/reset")

@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Callable, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from sqlalchemy import text as sql_text
@@ -7,6 +7,8 @@ from .config import settings
 from .pgvector_store import get_vector_store
 from .database import engine
 from PyPDF2 import PdfReader
+
+ProgressCallback = Optional[Callable[[str, str], None]]
 
 logger = logging.getLogger(__name__)
 
@@ -77,3 +79,53 @@ def ingest_txt(text: str, source: str, user_id: str):
     """Ingest plain text into the vector store."""
     documents = _to_documents(text, source)
     embed_and_store(documents, user_id, source=source)
+
+
+def ingest_pdf_with_progress(
+    file_path: str, source: str, user_id: str, on_progress: ProgressCallback = None,
+) -> dict:
+    """Ingest a PDF with progress callbacks for pipeline visibility."""
+    reader = PdfReader(file_path)
+    page_count = len(reader.pages)
+    if on_progress:
+        on_progress("extracting", f"Extracting text from {page_count} pages")
+
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    word_count = len(text.split())
+    if on_progress:
+        on_progress("extracted", f"{word_count} words from {page_count} pages")
+
+    documents = _to_documents(text, source)
+    chunk_count = len(documents)
+    if on_progress:
+        on_progress("chunking", f"Split into {chunk_count} chunks ({settings.CHUNK_SIZE} chars, {settings.CHUNK_OVERLAP} overlap)")
+
+    if on_progress:
+        on_progress("embedding", f"Generating embeddings for {chunk_count} chunks")
+    embed_and_store(documents, user_id, source=source)
+    if on_progress:
+        on_progress("stored", f"Stored {chunk_count} vectors in HNSW index")
+
+    return {"words": word_count, "chunks": chunk_count, "pages": page_count}
+
+
+def ingest_txt_with_progress(
+    text: str, source: str, user_id: str, on_progress: ProgressCallback = None,
+) -> dict:
+    """Ingest plain text with progress callbacks for pipeline visibility."""
+    word_count = len(text.split())
+    if on_progress:
+        on_progress("extracted", f"{word_count} words extracted")
+
+    documents = _to_documents(text, source)
+    chunk_count = len(documents)
+    if on_progress:
+        on_progress("chunking", f"Split into {chunk_count} chunks ({settings.CHUNK_SIZE} chars, {settings.CHUNK_OVERLAP} overlap)")
+
+    if on_progress:
+        on_progress("embedding", f"Generating embeddings for {chunk_count} chunks")
+    embed_and_store(documents, user_id, source=source)
+    if on_progress:
+        on_progress("stored", f"Stored {chunk_count} vectors in HNSW index")
+
+    return {"words": word_count, "chunks": chunk_count}

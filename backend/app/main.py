@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 
 from .config import settings
 from .database import Base, engine
-from .routers import auth, ingest, chat, admin, jobs
+from .routers import auth, ingest, chat, admin, jobs, analysis
 from .background import start_background_tasks, stop_background_tasks
 from .crawler import BrowserPool
 from .pgvector_store import init_pgvector
@@ -169,6 +169,7 @@ app.include_router(ingest.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(jobs.router)
+app.include_router(analysis.router)
 
 @app.get("/health")
 def health():

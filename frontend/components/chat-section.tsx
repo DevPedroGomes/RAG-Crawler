@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
-import { api, type ChatResponse } from "@/lib/api"
+import { api, type ChatSource } from "@/lib/api"
 import { MessageSquare, Send, RotateCcw, Loader2, FileText, User, Bot, AlertCircle, Info } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -12,14 +12,15 @@ interface Message {
   id: string
   role: "user" | "assistant" | "system"
   content: string
-  sources?: { url: string; preview: string }[]
+  sources?: ChatSource[]
   timestamp: Date
+  isStreaming?: boolean
 }
 
 interface ChatSectionProps {
   hasDocuments: boolean
   onReset?: () => void
-  systemMessage?: { id: string; content: string } | null  // System message with unique ID
+  systemMessage?: { id: string; content: string } | null
 }
 
 export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectionProps) {
@@ -29,7 +30,6 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
   const [error, setError] = useState("")
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }
@@ -38,7 +38,6 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
     scrollToBottom()
   }, [messages])
 
-  // Add system message when new document is uploaded
   useEffect(() => {
     if (systemMessage) {
       const sysMsg: Message = {
@@ -61,13 +60,23 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
       timestamp: new Date(),
     }
 
-    setMessages((prev) => [...prev, userMessage])
+    const assistantId = crypto.randomUUID()
+    const assistantMessage: Message = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      sources: [],
+      timestamp: new Date(),
+      isStreaming: true,
+    }
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage])
+    const currentQuestion = question.trim()
     setQuestion("")
     setError("")
     setLoading(true)
 
     try {
-      // Send chat history along with the question (exclude system messages)
       const chatHistory = messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({
@@ -75,21 +84,39 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
           content: m.content,
         }))
 
-      const result = await api.ask(question.trim(), chatHistory)
-
-      const assistantMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: result.answer,
-        sources: result.sources,
-        timestamp: new Date(),
-      }
-
-      setMessages((prev) => [...prev, assistantMessage])
+      await api.askStream(currentQuestion, chatHistory, {
+        onSources: (sources) => {
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantId ? { ...m, sources } : m)
+          )
+        },
+        onToken: (text) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + text } : m
+            )
+          )
+        },
+        onDone: () => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, isStreaming: false } : m
+            )
+          )
+        },
+        onError: (message) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: message, isStreaming: false }
+                : m
+            )
+          )
+        },
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to get answer")
-      // Remove the user message if request failed
-      setMessages((prev) => prev.filter((m) => m.id !== userMessage.id))
+      setMessages((prev) => prev.filter((m) => m.id !== userMessage.id && m.id !== assistantId))
     } finally {
       setLoading(false)
     }
@@ -137,7 +164,6 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
       </CardHeader>
 
       <CardContent className="flex-1 flex flex-col min-h-0 space-y-4">
-        {/* No documents warning */}
         {!hasDocuments && (
           <div className="flex items-center gap-3 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-4">
             <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
@@ -150,7 +176,6 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
           </div>
         )}
 
-        {/* Messages area */}
         <div className="flex-1 overflow-y-auto rounded-lg border border-border/50 bg-muted/20 p-4 space-y-4 min-h-[200px]">
           {messages.length === 0 ? (
             <div className="h-full flex items-center justify-center text-muted-foreground">
@@ -170,7 +195,6 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
                     message.role === "system" && "justify-center"
                   )}
                 >
-                  {/* System message - centered with info icon */}
                   {message.role === "system" && (
                     <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-2 max-w-[90%]">
                       <Info className="h-4 w-4 text-blue-500 flex-shrink-0" />
@@ -193,10 +217,14 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
                         : "bg-card border border-border/50"
                     )}
                   >
-                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                    <p className="text-sm whitespace-pre-wrap">
+                      {message.content}
+                      {message.isStreaming && (
+                        <span className="inline-block w-2 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
+                      )}
+                    </p>
 
-                    {/* Sources for assistant messages */}
-                    {message.role === "assistant" && message.sources && message.sources.length > 0 && (
+                    {message.role === "assistant" && message.sources && message.sources.length > 0 && !message.isStreaming && (
                       <div className="pt-2 border-t border-border/30 space-y-2">
                         <p className="text-xs font-medium flex items-center gap-1 text-muted-foreground">
                           <FileText className="h-3 w-3" />
@@ -220,9 +248,11 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
                       </div>
                     )}
 
+                    {!message.isStreaming && (
                     <p className="text-xs opacity-50">
                       {message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </p>
+                    )}
                   </div>
                   )}
 
@@ -234,30 +264,13 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
                 </div>
               ))}
 
-              {/* Loading indicator */}
-              {loading && (
-                <div className="flex gap-3 justify-start">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                    <Bot className="h-4 w-4 text-primary" />
-                  </div>
-                  <div className="bg-card border border-border/50 rounded-lg p-3">
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Thinking...
-                    </div>
-                  </div>
-                </div>
-              )}
-
               <div ref={messagesEndRef} />
             </>
           )}
         </div>
 
-        {/* Error display */}
         {error && <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
 
-        {/* Input area */}
         <div className="flex-shrink-0 space-y-2">
           <Textarea
             placeholder={hasDocuments ? "Ask a question about your documents..." : "Index documents first..."}
@@ -282,7 +295,7 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
               {loading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Sending...
+                  Generating...
                 </>
               ) : (
                 <>

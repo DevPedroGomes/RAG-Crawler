@@ -89,83 +89,8 @@ def get_retriever(user_id: str):
     )
 
 
-def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = None) -> dict:
-    """
-    Answer a question using RAG with HYBRID SEARCH and conversation memory.
-
-    Pipeline:
-    1. Hybrid Search (semantic + keyword with RRF)
-    2. Format context with sources
-    3. Generate answer with chat history
-
-    Args:
-        question: The user's question
-        user_id: User ID for document isolation
-        chat_history: Optional list of previous messages [{role, content}, ...]
-
-    Returns:
-        dict with answer and sources
-    """
-    # Get relevant documents using HYBRID SEARCH (semantic + keyword)
-    try:
-        docs = search_documents(
-            query=question,
-            user_id=user_id,
-            top_k=settings.TOP_K,
-        )
-    except (APIConnectionError, APITimeoutError) as e:
-        logger.error(f"OpenAI embedding search failed: {e}")
-        return {
-            "answer": "I'm unable to search your documents right now because the AI service is temporarily unavailable. Please try again in a moment.",
-            "sources": [],
-        }
-    except RateLimitError as e:
-        logger.warning(f"OpenAI rate limit hit during search: {e}")
-        return {
-            "answer": "The AI service is currently rate-limited. Please wait a moment and try again.",
-            "sources": [],
-        }
-
-    logger.debug(f"Retrieved {len(docs)} documents for query: {question[:50]}...")
-
-    # Format context from documents
-    ctx = _format_docs(docs)
-
-    # Convert chat history to LangChain format
-    history_messages = _convert_chat_history(chat_history)
-
-    # Get cached LLM and generate response
-    llm = _get_llm()
-
-    # Format prompt with context and history
-    prompt_messages = _PROMPT.format_messages(
-        context=ctx,
-        chat_history=history_messages,
-        question=question
-    )
-
-    try:
-        out = llm.invoke(prompt_messages)
-    except RateLimitError as e:
-        logger.warning(f"OpenAI rate limit hit during LLM call: {e}")
-        return {
-            "answer": "The AI service is currently rate-limited. Please wait a moment and try again.",
-            "sources": [],
-        }
-    except (APIConnectionError, APITimeoutError) as e:
-        logger.error(f"OpenAI LLM unavailable: {e}")
-        return {
-            "answer": "The AI service is temporarily unavailable. Please try again in a moment.",
-            "sources": [],
-        }
-    except APIError as e:
-        logger.error(f"OpenAI API error: {e}")
-        return {
-            "answer": "An error occurred while generating the response. Please try again.",
-            "sources": [],
-        }
-
-    # Extract sources from retrieved documents
+def _extract_sources(docs) -> list:
+    """Extract unique sources from retrieved documents."""
     sources = []
     seen = set()
     for d in docs:
@@ -174,11 +99,103 @@ def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = Non
             preview = d.page_content[:200].strip()
             if len(d.page_content) > 200:
                 preview += "..."
-
-            sources.append({
-                "url": src,
-                "preview": preview
-            })
+            sources.append({"url": src, "preview": preview})
             seen.add(src)
+    return sources
 
-    return {"answer": out.content, "sources": sources}
+
+def _retrieve_docs(question: str, user_id: str):
+    """Retrieve documents using hybrid search. Returns (docs, error_dict_or_none)."""
+    try:
+        docs = search_documents(
+            query=question,
+            user_id=user_id,
+            top_k=settings.TOP_K,
+        )
+        return docs, None
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI embedding search failed: {e}")
+        return [], {
+            "answer": "I'm unable to search your documents right now because the AI service is temporarily unavailable. Please try again in a moment.",
+            "sources": [],
+        }
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit hit during search: {e}")
+        return [], {
+            "answer": "The AI service is currently rate-limited. Please wait a moment and try again.",
+            "sources": [],
+        }
+
+
+def answer(question: str, user_id: str, chat_history: Optional[List[dict]] = None) -> dict:
+    """Answer a question using RAG (non-streaming)."""
+    docs, err = _retrieve_docs(question, user_id)
+    if err:
+        return err
+
+    logger.debug(f"Retrieved {len(docs)} documents for query: {question[:50]}...")
+
+    ctx = _format_docs(docs)
+    history_messages = _convert_chat_history(chat_history)
+    llm = _get_llm()
+    prompt_messages = _PROMPT.format_messages(
+        context=ctx, chat_history=history_messages, question=question
+    )
+
+    try:
+        out = llm.invoke(prompt_messages)
+    except RateLimitError as e:
+        logger.warning(f"OpenAI rate limit hit during LLM call: {e}")
+        return {"answer": "The AI service is currently rate-limited. Please wait a moment and try again.", "sources": []}
+    except (APIConnectionError, APITimeoutError) as e:
+        logger.error(f"OpenAI LLM unavailable: {e}")
+        return {"answer": "The AI service is temporarily unavailable. Please try again in a moment.", "sources": []}
+    except APIError as e:
+        logger.error(f"OpenAI API error: {e}")
+        return {"answer": "An error occurred while generating the response. Please try again.", "sources": []}
+
+    return {"answer": out.content, "sources": _extract_sources(docs)}
+
+
+def answer_stream(question: str, user_id: str, chat_history: Optional[List[dict]] = None):
+    """
+    Stream an answer using SSE events.
+
+    Yields SSE-formatted strings:
+      event: sources  -> JSON array of source objects
+      event: token    -> text chunk from LLM
+      event: done     -> signals completion
+      event: error    -> error message
+    """
+    import json
+
+    docs, err = _retrieve_docs(question, user_id)
+    if err:
+        yield f"event: error\ndata: {json.dumps({'message': err['answer']})}\n\n"
+        return
+
+    sources = _extract_sources(docs)
+    yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+
+    ctx = _format_docs(docs)
+    history_messages = _convert_chat_history(chat_history)
+    llm = _get_llm()
+    prompt_messages = _PROMPT.format_messages(
+        context=ctx, chat_history=history_messages, question=question
+    )
+
+    try:
+        for chunk in llm.stream(prompt_messages):
+            if chunk.content:
+                yield f"event: token\ndata: {json.dumps({'text': chunk.content})}\n\n"
+    except RateLimitError:
+        yield f"event: error\ndata: {json.dumps({'message': 'The AI service is currently rate-limited.'})}\n\n"
+        return
+    except (APIConnectionError, APITimeoutError):
+        yield f"event: error\ndata: {json.dumps({'message': 'The AI service is temporarily unavailable.'})}\n\n"
+        return
+    except APIError:
+        yield f"event: error\ndata: {json.dumps({'message': 'An error occurred while generating the response.'})}\n\n"
+        return
+
+    yield f"event: done\ndata: {{}}\n\n"
