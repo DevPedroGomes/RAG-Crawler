@@ -27,7 +27,9 @@ def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.1,
-        api_key=settings.OPENAI_API_KEY
+        api_key=settings.OPENAI_API_KEY,
+        timeout=60,
+        max_retries=1,
     )
 
 # System prompt for the RAG assistant
@@ -172,6 +174,7 @@ def answer_stream(question: str, user_id: str, chat_history: Optional[List[dict]
     docs, err = _retrieve_docs(question, user_id)
     if err:
         yield f"event: error\ndata: {json.dumps({'message': err['answer']})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"
         return
 
     sources = _extract_sources(docs)
@@ -190,12 +193,15 @@ def answer_stream(question: str, user_id: str, chat_history: Optional[List[dict]
                 yield f"event: token\ndata: {json.dumps({'text': chunk.content})}\n\n"
     except RateLimitError:
         yield f"event: error\ndata: {json.dumps({'message': 'The AI service is currently rate-limited.'})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"
         return
     except (APIConnectionError, APITimeoutError):
         yield f"event: error\ndata: {json.dumps({'message': 'The AI service is temporarily unavailable.'})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"
         return
     except APIError:
         yield f"event: error\ndata: {json.dumps({'message': 'An error occurred while generating the response.'})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"
         return
 
     yield f"event: done\ndata: {{}}\n\n"

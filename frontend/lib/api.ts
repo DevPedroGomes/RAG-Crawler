@@ -113,16 +113,14 @@ class ApiClient {
     return headers
   }
 
-  private async getAuthHeader(): Promise<HeadersInit> {
+  private async getBearerHeader(): Promise<HeadersInit> {
     const headers: HeadersInit = {}
-
     if (this.getToken) {
       const token = await this.getToken()
       if (token) {
         headers["Authorization"] = `Bearer ${token}`
       }
     }
-
     return headers
   }
 
@@ -148,7 +146,7 @@ class ApiClient {
     const formData = new FormData()
     formData.append("file", file)
 
-    const headers = await this.getAuthHeader()
+    const headers = await this.getBearerHeader()
 
     const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
       method: "POST",
@@ -168,7 +166,7 @@ class ApiClient {
     const formData = new FormData()
     formData.append("url", url)
 
-    const headers = await this.getAuthHeader()
+    const headers = await this.getBearerHeader()
 
     const response = await fetch(`${API_BASE_URL}/ingest/crawl`, {
       method: "POST",
@@ -195,7 +193,7 @@ class ApiClient {
   async waitForJob(
     jobId: string,
     intervalMs = 2000,
-    maxAttempts = 60,
+    maxAttempts = 150,
     onProgress?: (steps: ProgressStep[]) => void,
   ): Promise<JobStatusResponse> {
     for (let i = 0; i < maxAttempts; i++) {
@@ -226,6 +224,7 @@ class ApiClient {
     question: string,
     chatHistory: ChatHistoryMessage[] = [],
     callbacks: StreamCallbacks,
+    signal?: AbortSignal,
   ): Promise<void> {
     const headers = await this.getHeaders()
 
@@ -233,6 +232,7 @@ class ApiClient {
       method: "POST",
       headers,
       body: JSON.stringify({ question, chat_history: chatHistory }),
+      signal,
     })
 
     if (!response.ok) {
@@ -249,6 +249,7 @@ class ApiClient {
 
     const decoder = new TextDecoder()
     let buffer = ""
+    let eventType = ""
 
     while (true) {
       const { done, value } = await reader.read()
@@ -258,7 +259,6 @@ class ApiClient {
       const lines = buffer.split("\n")
       buffer = lines.pop() || ""
 
-      let eventType = ""
       for (const line of lines) {
         if (line.startsWith("event: ")) {
           eventType = line.slice(7).trim()

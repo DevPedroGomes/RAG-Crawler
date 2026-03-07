@@ -222,6 +222,8 @@ def health():
     # Check OpenAI API key is configured
     health_status["checks"]["openai_configured"] = "ok" if settings.OPENAI_API_KEY else "not configured"
 
+    if health_status["status"] == "unhealthy":
+        return JSONResponse(status_code=503, content=health_status)
     return health_status
 
 @app.get("/")

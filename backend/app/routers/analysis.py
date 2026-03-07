@@ -116,13 +116,19 @@ def get_embeddings_2d(
     vectors = []
     points_meta = []
     for row in rows:
-        vec_str = row.embedding_str.strip("[]")
-        vec = [float(x) for x in vec_str.split(",")]
+        try:
+            vec = json.loads(row.embedding_str)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Skipping chunk with unparseable embedding")
+            continue
         vectors.append(vec)
         points_meta.append({
             "preview": row.preview + ("..." if len(row.preview) >= 120 else ""),
             "source": row.source or "unknown",
         })
+
+    if len(vectors) < 2:
+        return {"points": [], "message": "Need at least 2 valid chunks for visualization"}
 
     vectors_np = np.array(vectors)
 

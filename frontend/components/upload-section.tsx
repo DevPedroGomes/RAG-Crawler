@@ -83,9 +83,18 @@ export function UploadSection({
     setFileStatuses(prev => prev.map(f => f.id === id ? { ...f, ...updates } : f))
   }
 
+  const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files || files.length === 0) return
+
+    const oversized = Array.from(files).filter(f => f.size > MAX_FILE_SIZE)
+    if (oversized.length > 0) {
+      setError(`File${oversized.length > 1 ? "s" : ""} too large (max 5MB): ${oversized.map(f => f.name).join(", ")}`)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+      return
+    }
 
     setError("")
     setIsUploading(true)
@@ -105,7 +114,7 @@ export function UploadSection({
         const jobResponse = await api.uploadFile(file)
         updateFileStatus(fileId, { status: "processing" })
 
-        const result = await api.waitForJob(jobResponse.job_id, 2000, 60, (steps) => {
+        const result = await api.waitForJob(jobResponse.job_id, 2000, 150, (steps) => {
           updateFileStatus(fileId, { progress: steps })
         })
 
@@ -163,7 +172,7 @@ export function UploadSection({
       setUrlLoading(false)
       setUrlProcessing(true)
 
-      const result = await api.waitForJob(jobResponse.job_id, 2000, 60, (steps) => {
+      const result = await api.waitForJob(jobResponse.job_id, 2000, 150, (steps) => {
         setUrlProgress(steps)
       })
 

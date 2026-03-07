@@ -6,25 +6,42 @@ Extracts user_id from the 'sub' claim.
 Validates 'azp' (authorized party) to ensure token is for this application.
 """
 import logging
+import time
+import threading
 import jwt
 from jwt import PyJWKClient
 from fastapi import Request, HTTPException
-from functools import lru_cache
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
+_jwks_client: PyJWKClient | None = None
+_jwks_client_created_at: float = 0
+_jwks_lock = threading.Lock()
+_JWKS_TTL_SECONDS = 300  # Refresh JWKS client every 5 minutes
 
-@lru_cache()
+
 def get_jwks_client() -> PyJWKClient:
     """
-    Returns cached JWKS client for Clerk.
-    Uses the frontend's Clerk instance JWKS endpoint.
+    Returns JWKS client for Clerk with TTL-based refresh.
+    Recreates the client every 5 minutes to pick up key rotations.
     """
-    # Clerk JWKS URL format: https://<your-clerk-frontend-api>/.well-known/jwks.json
-    # Or use the generic Clerk API endpoint
-    jwks_url = settings.CLERK_JWKS_URL or "https://api.clerk.com/v1/jwks"
-    return PyJWKClient(jwks_url)
+    global _jwks_client, _jwks_client_created_at
+
+    now = time.monotonic()
+    if _jwks_client and (now - _jwks_client_created_at) < _JWKS_TTL_SECONDS:
+        return _jwks_client
+
+    with _jwks_lock:
+        # Double-check after acquiring lock
+        if _jwks_client and (time.monotonic() - _jwks_client_created_at) < _JWKS_TTL_SECONDS:
+            return _jwks_client
+
+        jwks_url = settings.CLERK_JWKS_URL or "https://api.clerk.com/v1/jwks"
+        _jwks_client = PyJWKClient(jwks_url)
+        _jwks_client_created_at = time.monotonic()
+        logger.debug("JWKS client refreshed")
+        return _jwks_client
 
 
 def verify_clerk_token(token: str) -> dict:

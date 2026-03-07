@@ -7,6 +7,7 @@ from ..crawler import is_safe_url
 from ..pgvector_store import get_unique_source_count
 import tempfile
 import os
+import threading
 from slowapi import Limiter
 
 
@@ -31,6 +32,47 @@ limiter = Limiter(key_func=get_user_id_for_rate_limit)
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB per file
 MAX_DOCUMENTS_PER_USER = 5  # Maximum 5 documents per user
 
+# Per-user locks to prevent race conditions on document limit checks + enqueue
+_user_locks: dict[str, threading.Lock] = {}
+_user_locks_lock = threading.Lock()
+
+
+def _get_user_lock(user_id: str) -> threading.Lock:
+    """Get or create a per-user lock for document limit checks."""
+    if user_id not in _user_locks:
+        with _user_locks_lock:
+            if user_id not in _user_locks:
+                _user_locks[user_id] = threading.Lock()
+    return _user_locks[user_id]
+
+
+def _check_limit_and_enqueue_file(user_id: str, file_path: str, filename: str, is_pdf: bool) -> str:
+    """Atomically check document limit and enqueue file task under lock."""
+    user_lock = _get_user_lock(user_id)
+    with user_lock:
+        current_docs = get_unique_source_count(user_id)
+        if current_docs >= MAX_DOCUMENTS_PER_USER:
+            raise HTTPException(
+                400,
+                f"Document limit reached. Maximum {MAX_DOCUMENTS_PER_USER} documents allowed. "
+                "Please reset your knowledge base to upload new documents."
+            )
+        return enqueue_file_task(file_path, filename, is_pdf, user_id)
+
+
+def _check_limit_and_enqueue_url(user_id: str, url: str) -> str:
+    """Atomically check document limit and enqueue URL task under lock."""
+    user_lock = _get_user_lock(user_id)
+    with user_lock:
+        current_docs = get_unique_source_count(user_id)
+        if current_docs >= MAX_DOCUMENTS_PER_USER:
+            raise HTTPException(
+                400,
+                f"Document limit reached. Maximum {MAX_DOCUMENTS_PER_USER} documents allowed. "
+                "Please reset your knowledge base to index new URLs."
+            )
+        return enqueue_url_task(url, user_id)
+
 
 @router.post("/upload", status_code=202)
 @limiter.limit("10/hour")
@@ -47,20 +89,10 @@ async def upload(
     Rate limited to 10 uploads per hour per user.
     Maximum file size: 5MB. Maximum 5 documents per user.
     """
-    # Check document limit
-    current_docs = get_unique_source_count(user_id)
-    if current_docs >= MAX_DOCUMENTS_PER_USER:
-        raise HTTPException(
-            400,
-            f"Document limit reached. Maximum {MAX_DOCUMENTS_PER_USER} documents allowed. "
-            "Please reset your knowledge base to upload new documents."
-        )
-
     filename = file.filename or "document.txt"
-    ext = filename.lower()
-    is_pdf = ext.endswith(".pdf")
+    is_pdf = filename.lower().endswith(".pdf")
 
-    # Read and validate file size
+    # Read and validate file size (outside lock — I/O bound)
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(413, f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
@@ -74,8 +106,8 @@ async def upload(
         file_path = tmp.name
 
     try:
-        # Enqueue task for background processing
-        job_id = enqueue_file_task(file_path, filename, is_pdf, user_id)
+        # Atomically check limit + enqueue under per-user lock
+        job_id = _check_limit_and_enqueue_file(user_id, file_path, filename, is_pdf)
 
         return JSONResponse(
             status_code=202,
@@ -86,8 +118,11 @@ async def upload(
                 "message": f"Document '{filename}' queued for processing"
             }
         )
-    except Exception as e:
-        # Clean up file if enqueueing fails
+    except HTTPException:
+        if os.path.exists(file_path):
+            os.unlink(file_path)
+        raise
+    except Exception:
         if os.path.exists(file_path):
             os.unlink(file_path)
         raise HTTPException(500, "Error queuing document for processing")
@@ -107,23 +142,14 @@ async def crawl(
     Rate limited to 10 crawls per hour per user.
     Maximum 5 documents per user.
     """
-    # Check document limit
-    current_docs = get_unique_source_count(user_id)
-    if current_docs >= MAX_DOCUMENTS_PER_USER:
-        raise HTTPException(
-            400,
-            f"Document limit reached. Maximum {MAX_DOCUMENTS_PER_USER} documents allowed. "
-            "Please reset your knowledge base to index new URLs."
-        )
-
     # Validate URL before queuing (SSRF protection)
     is_valid, error_msg = is_safe_url(url)
     if not is_valid:
         raise HTTPException(400, f"URL blocked: {error_msg}")
 
     try:
-        # Enqueue task for background processing
-        job_id = enqueue_url_task(url, user_id)
+        # Atomically check limit + enqueue under per-user lock
+        job_id = _check_limit_and_enqueue_url(user_id, url)
 
         return JSONResponse(
             status_code=202,
@@ -134,5 +160,7 @@ async def crawl(
                 "message": f"URL '{url}' queued for indexing"
             }
         )
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(500, "Error queuing URL for processing")

@@ -29,6 +29,7 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -37,6 +38,12 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort()
+    }
+  }, [])
 
   useEffect(() => {
     if (systemMessage) {
@@ -77,6 +84,10 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
     setLoading(true)
 
     try {
+      abortControllerRef.current?.abort()
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+
       const chatHistory = messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({
@@ -113,8 +124,17 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
             )
           )
         },
-      })
+      }, controller.signal)
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // Mark aborted message as no longer streaming
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, isStreaming: false } : m
+          )
+        )
+        return
+      }
       setError(err instanceof Error ? err.message : "Failed to get answer")
       setMessages((prev) => prev.filter((m) => m.id !== userMessage.id && m.id !== assistantId))
     } finally {
