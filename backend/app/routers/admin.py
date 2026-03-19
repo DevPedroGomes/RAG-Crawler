@@ -4,9 +4,12 @@ Admin Router - User Data Management
 Clerk handles authentication (logout via frontend).
 This router provides data management operations.
 """
+import logging
 from fastapi import APIRouter, HTTPException, Request, Depends
 from ..security import require_auth
 from ..pgvector_store import delete_user_documents
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -26,4 +29,5 @@ def clear_user_data(
         delete_user_documents(user_id)
         return {"ok": True, "message": "User data cleared successfully"}
     except Exception as e:
-        raise HTTPException(500, f"Error clearing data: {str(e)}")
+        logger.error(f"Error clearing data for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(500, "Error clearing data. Please try again.")

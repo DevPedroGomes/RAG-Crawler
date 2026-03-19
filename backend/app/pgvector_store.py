@@ -120,6 +120,7 @@ def get_embeddings():
     )
 
 
+@lru_cache(maxsize=32)
 def get_vector_store(user_id: str) -> PGVector:
     """
     Get PGVector store for a specific user.

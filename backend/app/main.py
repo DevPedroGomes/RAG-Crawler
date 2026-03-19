@@ -191,7 +191,8 @@ def health():
             conn.execute(text("SELECT 1"))
         health_status["checks"]["database"] = "ok"
     except Exception as e:
-        health_status["checks"]["database"] = f"error: {str(e)}"
+        logger.error(f"Database health check failed: {e}")
+        health_status["checks"]["database"] = "error"
         health_status["status"] = "unhealthy"
 
     # Check Redis
@@ -200,7 +201,8 @@ def health():
         redis_conn.ping()
         health_status["checks"]["redis"] = "ok"
     except Exception as e:
-        health_status["checks"]["redis"] = f"error: {str(e)}"
+        logger.error(f"Redis health check failed: {e}")
+        health_status["checks"]["redis"] = "error"
         health_status["status"] = "unhealthy"
 
     # Check RQ Worker status
@@ -217,10 +219,8 @@ def health():
         if len(workers) == 0:
             health_status["checks"]["worker"]["warning"] = "no active workers"
     except Exception as e:
-        health_status["checks"]["worker"] = f"error: {str(e)}"
-
-    # Check OpenAI API key is configured
-    health_status["checks"]["openai_configured"] = "ok" if settings.OPENAI_API_KEY else "not configured"
+        logger.error(f"Worker health check failed: {e}")
+        health_status["checks"]["worker"] = "error"
 
     if health_status["status"] == "unhealthy":
         return JSONResponse(status_code=503, content=health_status)

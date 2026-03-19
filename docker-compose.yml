@@ -10,6 +10,15 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ragdb}
     volumes:
       - ragcrawler_pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - internal
     healthcheck:
@@ -25,6 +34,15 @@ services:
     restart: unless-stopped
     volumes:
       - ragcrawler_redis:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - internal
     healthcheck:
@@ -40,6 +58,15 @@ services:
       dockerfile: Dockerfile
     container_name: ragcrawler-backend
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       DATABASE_URL: postgresql://${POSTGRES_USER:-ragcrawler}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ragdb}
@@ -70,6 +97,15 @@ services:
       dockerfile: Dockerfile
     container_name: ragcrawler-worker
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "-m", "rq.cli", "worker", "--url", "redis://redis:6379/0", "default"]
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -103,6 +139,15 @@ services:
         BACKEND_INTERNAL_URL: http://backend:8000
     container_name: ragcrawler-frontend
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       NODE_ENV: production
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}

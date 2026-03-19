@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # ==== Application Settings ====
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    MAX_DOCUMENTS_PER_USER: int = int(os.getenv("MAX_DOCUMENTS_PER_USER", "5"))
 
     @field_validator("OPENAI_API_KEY")
     @classmethod

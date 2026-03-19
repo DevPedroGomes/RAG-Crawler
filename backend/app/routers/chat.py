@@ -14,7 +14,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 limiter = Limiter(key_func=get_remote_address)
 
 
-MAX_DOCUMENTS_PER_USER = 5  # Keep in sync with ingest.py
+from ..config import settings
+
+MAX_DOCUMENTS_PER_USER = settings.MAX_DOCUMENTS_PER_USER
 
 
 @router.get("/documents", response_model=DocumentCountOut)

@@ -10,7 +10,6 @@ import "./globals.css"
 export const metadata: Metadata = {
   title: "RAG Chatbot - AI Knowledge Assistant",
   description: "Chat with your documents using AI-powered retrieval",
-  generator: "v0.app",
 }
 
 export default function RootLayout({

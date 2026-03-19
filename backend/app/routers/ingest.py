@@ -30,7 +30,8 @@ limiter = Limiter(key_func=get_user_id_for_rate_limit)
 
 # Limits for showcase app
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB per file
-MAX_DOCUMENTS_PER_USER = 5  # Maximum 5 documents per user
+from ..config import settings as app_settings
+MAX_DOCUMENTS_PER_USER = app_settings.MAX_DOCUMENTS_PER_USER
 
 # Per-user locks to prevent race conditions on document limit checks + enqueue
 _user_locks: dict[str, threading.Lock] = {}
