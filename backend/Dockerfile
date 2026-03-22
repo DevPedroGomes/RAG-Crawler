@@ -1,18 +1,15 @@
-FROM python:3.11-slim
+FROM mcr.microsoft.com/playwright/python:v1.47.0-noble
 
 WORKDIR /app
 
-# Install system deps for Playwright + curl for healthcheck
+# curl for healthcheck + libpq for psycopg
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright Chromium with system deps
-RUN playwright install chromium --with-deps
 
 # Copy application code
 COPY . .
