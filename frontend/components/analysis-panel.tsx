@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api, type SearchComparisonResult, type EmbeddingPoint } from "@/lib/api"
-import { Search, Loader2, BarChart3, Sparkles, Type, Combine, Maximize2 } from "lucide-react"
+import { Search, Loader2, BarChart3, Sparkles, Type, Combine, Maximize2, AlertCircle, RefreshCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 // --- Search Comparison ---
@@ -51,6 +51,7 @@ function SearchResultList({ results, label, icon: Icon, color }: {
 function SearchComparison({ hasDocuments }: { hasDocuments: boolean }) {
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [results, setResults] = useState<{
     semantic: SearchComparisonResult[]
     keyword: SearchComparisonResult[]
@@ -60,11 +61,13 @@ function SearchComparison({ hasDocuments }: { hasDocuments: boolean }) {
   const handleSearch = async () => {
     if (!query.trim()) return
     setLoading(true)
+    setError(null)
     try {
       const data = await api.searchComparison(query.trim())
       setResults(data)
-    } catch {
+    } catch (err) {
       setResults(null)
+      setError(err instanceof Error ? err.message : "Failed to compare search methods. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -97,6 +100,26 @@ function SearchComparison({ hasDocuments }: { hasDocuments: boolean }) {
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
           </Button>
         </div>
+
+        {error && (
+          <div className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-destructive">Search comparison failed</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{error}</p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSearch}
+              disabled={loading || !query.trim()}
+              className="flex-shrink-0"
+            >
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+              Retry
+            </Button>
+          </div>
+        )}
 
         {results && (
           <div className="grid gap-4 md:grid-cols-3">
@@ -138,17 +161,20 @@ const SOURCE_COLORS = [
 function EmbeddingVisualization({ hasDocuments }: { hasDocuments: boolean }) {
   const [points, setPoints] = useState<EmbeddingPoint[]>([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [tooltip, setTooltip] = useState<{ x: number; y: number; point: EmbeddingPoint } | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
 
   const fetchEmbeddings = useCallback(async () => {
     if (!hasDocuments) return
     setLoading(true)
+    setError(null)
     try {
       const data = await api.getEmbeddings2D()
       setPoints(data.points || [])
-    } catch {
+    } catch (err) {
       setPoints([])
+      setError(err instanceof Error ? err.message : "Failed to load embedding visualization. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -192,6 +218,26 @@ function EmbeddingVisualization({ hasDocuments }: { hasDocuments: boolean }) {
         {!hasDocuments ? (
           <div className="flex items-center justify-center h-[300px] text-muted-foreground text-sm">
             Index documents to visualize embeddings
+          </div>
+        ) : error ? (
+          <div className="flex items-center justify-center h-[300px]">
+            <div className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4 max-w-md">
+              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-destructive">Embedding visualization failed</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{error}</p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={fetchEmbeddings}
+                disabled={loading}
+                className="flex-shrink-0"
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Retry
+              </Button>
+            </div>
           </div>
         ) : points.length < 2 ? (
           <div className="flex items-center justify-center h-[300px] text-muted-foreground text-sm">

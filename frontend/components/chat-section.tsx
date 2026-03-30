@@ -7,6 +7,16 @@ import { Textarea } from "@/components/ui/textarea"
 import { api, type ChatSource } from "@/lib/api"
 import { MessageSquare, Send, RotateCcw, Loader2, FileText, User, Bot, AlertCircle, Info } from "lucide-react"
 import { cn } from "@/lib/utils"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 
 interface Message {
   id: string
@@ -28,6 +38,8 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
   const [question, setQuestion] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const [resetDialogOpen, setResetDialogOpen] = useState(false)
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -142,15 +154,8 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
     }
   }
 
-  const handleReset = async () => {
-    if (
-      !confirm(
-        "Are you sure you want to reset your knowledge base? This will delete all indexed documents and chat history."
-      )
-    ) {
-      return
-    }
-
+  const handleResetConfirm = async () => {
+    setResetDialogOpen(false)
     setLoading(true)
     setError("")
 
@@ -166,11 +171,9 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
     }
   }
 
-  const handleClearChat = () => {
-    if (messages.length === 0) return
-    if (confirm("Clear chat history? (Documents will remain indexed)")) {
-      setMessages([])
-    }
+  const handleClearChatConfirm = () => {
+    setClearDialogOpen(false)
+    setMessages([])
   }
 
   return (
@@ -325,20 +328,57 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
               )}
             </Button>
             <Button
-              onClick={handleClearChat}
+              onClick={() => setClearDialogOpen(true)}
               disabled={loading || messages.length === 0}
               variant="outline"
               title="Clear chat history"
             >
               Clear
             </Button>
-            <Button onClick={handleReset} disabled={loading} variant="destructive" title="Delete all documents">
+            <Button onClick={() => setResetDialogOpen(true)} disabled={loading} variant="destructive" title="Delete all documents">
               <RotateCcw className="mr-2 h-4 w-4" />
               Reset
             </Button>
           </div>
         </div>
       </CardContent>
+
+      <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset Knowledge Base</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to reset your knowledge base? This will delete all indexed documents and chat history. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleResetConfirm}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Reset
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear Chat History</AlertDialogTitle>
+            <AlertDialogDescription>
+              Clear all chat messages? Your indexed documents will remain available.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleClearChatConfirm}>
+              Clear
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   )
 }

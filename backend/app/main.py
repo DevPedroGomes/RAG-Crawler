@@ -207,10 +207,10 @@ def health():
 
     # Check RQ Worker status
     try:
-        from rq import Queue
+        from rq import Queue, Worker
         redis_conn = Redis.from_url(settings.REDIS_URL)
         q = Queue('default', connection=redis_conn)
-        workers = q.workers
+        workers = Worker.all(connection=redis_conn)
         health_status["checks"]["worker"] = {
             "active_workers": len(workers),
             "queued_jobs": q.count,

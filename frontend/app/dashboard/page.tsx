@@ -1,7 +1,6 @@
 import { auth } from "@clerk/nextjs/server"
 import { redirect } from "next/navigation"
 import { UserButton } from "@clerk/nextjs"
-import { Brain } from "lucide-react"
 import { DashboardContent } from "@/components/dashboard-content"
 
 export default async function DashboardPage() {
@@ -12,30 +11,18 @@ export default async function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-10 border-b border-border/50 bg-card/80 backdrop-blur-sm">
-        <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-primary/10 p-2">
-              <Brain className="h-6 w-6 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight">RAG Assistant</h1>
-              <p className="text-xs text-muted-foreground">AI Knowledge Base</p>
-            </div>
+    <div className="min-h-screen bg-white">
+      <header className="sticky top-0 z-50 border-b border-neutral-200 bg-white/80 backdrop-blur-xl">
+        <div className="max-w-5xl mx-auto flex h-14 items-center justify-between px-6 sm:px-8">
+          <div className="flex items-center gap-2.5">
+            <img src="/logo.png" alt="Logo" className="h-8 w-8 rounded-lg object-cover" />
+            <span className="font-semibold tracking-tight text-neutral-900">RAG Assistant</span>
           </div>
           <UserButton afterSignOutUrl="/" />
         </div>
       </header>
 
-      <main className="container mx-auto space-y-8 p-4 py-8">
-        <div className="space-y-2">
-          <h2 className="text-3xl font-bold tracking-tight text-balance">Your Knowledge Base</h2>
-          <p className="text-muted-foreground text-balance">
-            Upload documents or index URLs to build your AI-powered knowledge assistant
-          </p>
-        </div>
-
+      <main className="max-w-5xl mx-auto px-6 sm:px-8 py-8">
         <DashboardContent />
       </main>
     </div>

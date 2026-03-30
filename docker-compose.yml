@@ -122,7 +122,7 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"from rq import Queue; from redis import Redis; r=Redis.from_url('redis://redis:6379/0'); q=Queue(connection=r); assert len(q.workers) > 0\""]
+      test: ["CMD-SHELL", "python -c \"from rq import Worker; from redis import Redis; r=Redis.from_url('redis://redis:6379/0'); assert len(Worker.all(connection=r)) > 0\""]
       interval: 30s
       timeout: 10s
       start_period: 15s
@@ -136,7 +136,7 @@ services:
       args:
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
         NEXT_PUBLIC_API_URL: /api
-        BACKEND_INTERNAL_URL: http://backend:8000
+        BACKEND_INTERNAL_URL: http://ragcrawler-backend:8000
     container_name: ragcrawler-frontend
     restart: unless-stopped
     deploy:
@@ -151,7 +151,7 @@ services:
     environment:
       NODE_ENV: production
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
-      BACKEND_INTERNAL_URL: http://backend:8000
+      BACKEND_INTERNAL_URL: http://ragcrawler-backend:8000
     depends_on:
       backend:
         condition: service_healthy
