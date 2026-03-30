@@ -101,6 +101,10 @@ async def upload(
     if len(content) == 0:
         raise HTTPException(400, "File is empty")
 
+    # Validate file content matches extension
+    if is_pdf and not content[:5].startswith(b"%PDF-"):
+        raise HTTPException(400, "File content does not match PDF format")
+
     # Save file to temp location (will be deleted by worker after processing)
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
         tmp.write(content)
