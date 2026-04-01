@@ -105,8 +105,10 @@ async def upload(
     if is_pdf and not content[:5].startswith(b"%PDF-"):
         raise HTTPException(400, "File content does not match PDF format")
 
-    # Save file to temp location (will be deleted by worker after processing)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
+    # Save file to shared volume (accessible by worker container)
+    upload_dir = "/tmp/uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1], dir=upload_dir) as tmp:
         tmp.write(content)
         file_path = tmp.name
 

@@ -148,7 +148,7 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
         return
       }
       setError(err instanceof Error ? err.message : "Failed to get answer")
-      setMessages((prev) => prev.filter((m) => m.id !== userMessage.id && m.id !== assistantId))
+      setMessages((prev) => prev.filter((m) => m.id !== assistantId))
     } finally {
       setLoading(false)
     }

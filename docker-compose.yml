@@ -76,6 +76,8 @@ services:
       ENVIRONMENT: production
       LOG_LEVEL: INFO
       HEADLESS: "true"
+    volumes:
+      - ragcrawler_uploads:/tmp/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,6 +108,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    volumes:
+      - ragcrawler_uploads:/tmp/uploads
     command: ["python", "-m", "rq.cli", "worker", "--url", "redis://redis:6379/0", "default"]
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -186,4 +190,6 @@ volumes:
   ragcrawler_pgdata:
     driver: local
   ragcrawler_redis:
+    driver: local
+  ragcrawler_uploads:
     driver: local

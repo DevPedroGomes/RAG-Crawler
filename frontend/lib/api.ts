@@ -251,40 +251,50 @@ class ApiClient {
     let buffer = ""
     let eventType = ""
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split("\n")
-      buffer = lines.pop() || ""
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop() || ""
 
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          eventType = line.slice(7).trim()
-        } else if (line.startsWith("data: ") && eventType) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            switch (eventType) {
-              case "sources":
-                callbacks.onSources(data)
-                break
-              case "token":
-                callbacks.onToken(data.text)
-                break
-              case "done":
-                callbacks.onDone()
-                break
-              case "error":
-                callbacks.onError(data.message)
-                break
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            eventType = line.slice(7).trim()
+          } else if (line.startsWith("data: ") && eventType) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              switch (eventType) {
+                case "sources":
+                  callbacks.onSources(data)
+                  break
+                case "token":
+                  callbacks.onToken(data.text)
+                  break
+                case "done":
+                  callbacks.onDone()
+                  break
+                case "error":
+                  callbacks.onError(data.message)
+                  break
+              }
+            } catch {
+              // skip malformed data
             }
-          } catch {
-            // skip malformed data
+            eventType = ""
           }
-          eventType = ""
         }
       }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        reader.cancel()
+        throw err
+      }
+      callbacks.onError(err instanceof Error ? err.message : "Stream error")
+    } finally {
+      reader.releaseLock()
     }
   }
 

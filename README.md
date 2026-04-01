@@ -1,246 +1,170 @@
 # RAG-Crawler
 
-A multi-tenant Retrieval-Augmented Generation (RAG) application that lets users upload documents or crawl web pages, then ask questions answered exclusively from that indexed content. Built as a production-grade showcase of modern AI engineering practices.
+A multi-tenant Retrieval-Augmented Generation application that indexes user-uploaded documents and crawled web pages, then answers questions exclusively from that content using hybrid search and streaming LLM responses. Built as a five-container Docker system with full data isolation per user.
 
-**Live demo:** [ragcrawler.pgdev.com.br](https://ragcrawler.pgdev.com.br)
-
----
-
-## Table of Contents
-
-- [How It Works](#how-it-works)
-- [Architecture](#architecture)
-- [AI Pipeline](#ai-pipeline)
-- [Tech Stack](#tech-stack)
-- [API Reference](#api-reference)
-- [Security](#security)
-- [Project Structure](#project-structure)
-- [Setup and Deployment](#setup-and-deployment)
-- [Environment Variables](#environment-variables)
-
----
-
-## How It Works
-
-1. A user signs up via Clerk authentication
-2. They upload PDF/TXT files or submit a URL to crawl
-3. The system extracts text, splits it into chunks, generates vector embeddings, and stores everything in PostgreSQL with pgvector
-4. When the user asks a question, a hybrid search (semantic + keyword) retrieves the most relevant chunks
-5. The retrieved context and conversation history are sent to GPT-4o-mini, which generates an answer grounded exclusively in the user's documents
-6. Each user's data is fully isolated and automatically cleaned up after 10 minutes of inactivity
+Live demo: https://ragcrawler.pgdev.com.br
 
 ---
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph Client
-        Browser["Browser"]
-    end
+RAG-Crawler runs as five Docker containers orchestrated by Docker Compose, sitting behind a Traefik reverse proxy for TLS termination and security headers.
 
-    subgraph Traefik["Traefik Reverse Proxy"]
-        SSL["TLS Termination<br/>Let's Encrypt"]
-        Headers["Security Headers<br/>HSTS, CSP, X-Frame-Options"]
-    end
+**Frontend (Next.js 15)** serves the UI and proxies all `/api/*` requests to the backend via an internal Next.js rewrite, so the backend is never exposed to the public internet. Authentication is handled by Clerk, which issues JWTs verified by the backend using JWKS (RS256).
 
-    subgraph Frontend["Frontend Container — Next.js"]
-        Pages["Pages<br/>Landing / Sign-in / Dashboard"]
-        Clerk["Clerk Auth<br/>JWT Tokens"]
-        APIClient["API Client<br/>Bearer Token Auth"]
-        Rewrite["Next.js Rewrite<br/>/api/* -> backend:8000/*"]
-    end
+**Backend (FastAPI)** handles all business logic: JWT verification, rate limiting, file validation (including PDF magic bytes check against `%PDF-` header), SSRF-safe URL validation, and the RAG pipeline (hybrid search + LLM streaming). Uploaded files are saved to a shared Docker volume at `/tmp/uploads` so both the backend and worker containers can access them.
 
-    subgraph Backend["Backend Container — FastAPI"]
-        Auth["JWT Verification<br/>RS256 + JWKS"]
-        RateLimit["Rate Limiter<br/>slowapi"]
-        IngestRouter["Ingest Router<br/>POST /ingest/upload<br/>POST /ingest/crawl"]
-        ChatRouter["Chat Router<br/>POST /chat/ask (non-stream)<br/>POST /chat/ask/stream (SSE)<br/>GET /chat/documents<br/>POST /chat/reset"]
-        AnalysisRouter["Analysis Router<br/>POST /analysis/search-comparison<br/>GET /analysis/embeddings-2d"]
-        JobsRouter["Jobs Router<br/>GET /jobs/:id (+ progress)"]
-        RAG["RAG Module<br/>Hybrid Search + LLM Streaming"]
-        Crawler["Crawler<br/>Playwright + SSRF Guard"]
-        Ingestion["Ingestion<br/>Chunking + Embeddings"]
-    end
+**Worker (RQ)** processes background jobs dequeued from Redis. It handles text extraction (PyPDF2 for PDFs, Playwright with headless Chromium for URLs), recursive text chunking, embedding generation via OpenAI, and vector storage in PostgreSQL. The worker shares the same codebase image as the backend.
 
-    subgraph Worker["Worker Container — RQ"]
-        RQWorker["RQ Worker<br/>Background Jobs"]
-    end
+**PostgreSQL 16 with pgvector** stores document chunks, their 1536-dimensional embedding vectors (HNSW-indexed), and a generated `tsvector` column (GIN-indexed) for full-text keyword search. Each user gets an isolated collection (`user_{clerk_id}`).
 
-    subgraph Data["Data Layer"]
-        PG["PostgreSQL 16<br/>pgvector Extension"]
-        Redis["Redis 7<br/>Job Queue + Cache"]
-    end
+**Redis 7** serves as the job queue for RQ, the embedding cache (SHA256-keyed, 1-hour TTL), and transient storage for granular job progress updates that the frontend polls in real time.
 
-    subgraph External["External Services"]
-        OpenAI["OpenAI API<br/>text-embedding-3-small<br/>gpt-4o-mini"]
-        ClerkAPI["Clerk API<br/>JWKS + Auth"]
-    end
-
-    Browser -->|HTTPS| SSL
-    SSL --> Headers
-    Headers --> Pages
-    Pages --> Clerk
-    Clerk --> APIClient
-    APIClient --> Rewrite
-    Rewrite -->|HTTP internal| Auth
-    Auth --> RateLimit
-    RateLimit --> IngestRouter
-    RateLimit --> ChatRouter
-    RateLimit --> AnalysisRouter
-    RateLimit --> JobsRouter
-    IngestRouter -->|Enqueue| Redis
-    ChatRouter -->|Stream SSE| RAG
-    AnalysisRouter --> RAG
-    RAG -->|Hybrid Search| PG
-    RAG -->|Generate Answer| OpenAI
-    Redis -->|Dequeue| RQWorker
-    RQWorker --> Crawler
-    RQWorker --> Ingestion
-    Crawler -->|Render Pages| Browser
-    Ingestion -->|Embeddings| OpenAI
-    Ingestion -->|Store Vectors| PG
-    Auth -->|Verify JWT| ClerkAPI
-    RAG -->|Embedding Cache| Redis
-```
-
-### Request Flow
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant FE as Frontend
-    participant BE as Backend
-    participant RQ as Worker
-    participant PG as PostgreSQL
-    participant AI as OpenAI API
-
-    Note over User,AI: Document Ingestion Flow
-
-    User->>FE: Upload PDF or submit URL
-    FE->>BE: POST /ingest/upload (JWT)
-    BE->>BE: Validate file size, type, user limits
-    BE->>RQ: Enqueue job (Redis)
-    BE-->>FE: 202 Accepted {job_id}
-    FE->>FE: Poll GET /jobs/{id} every 2s
-
-    RQ->>RQ: Extract text (PyPDF2 / Playwright)
-    RQ->>RQ: Split into chunks (1200 chars, 200 overlap)
-    RQ->>AI: Generate embeddings (text-embedding-3-small)
-    AI-->>RQ: 1536-dim vectors
-    RQ->>PG: Store chunks + vectors + metadata
-    RQ->>RQ: Mark job complete
-
-    FE->>BE: GET /jobs/{id}
-    BE-->>FE: {status: "finished"}
-    FE-->>User: Document ready
-
-    Note over User,AI: Question Answering Flow
-
-    User->>FE: Ask a question
-    FE->>BE: POST /chat/ask/stream {question, chat_history}
-    BE->>AI: Embed question
-    AI-->>BE: Query vector
-
-    par Hybrid Search
-        BE->>PG: Semantic search (cosine similarity)
-        BE->>PG: Keyword search (tsvector + ts_rank)
-    end
-
-    BE->>BE: Reciprocal Rank Fusion (merge results)
-    BE-->>FE: SSE event: sources [...]
-    BE->>AI: Stream LLM response
-    loop Token by token
-        AI-->>BE: text chunk
-        BE-->>FE: SSE event: token {text}
-    end
-    BE-->>FE: SSE event: done
-    FE-->>User: Answer streams in real time with citations
-```
+The frontend is the only container on the Traefik `proxy` network. All five containers share an `internal` bridge network. PostgreSQL and Redis are not exposed to the host.
 
 ---
 
-## AI Pipeline
+## Pipeline
 
-### Document Processing
+```mermaid
+flowchart TD
+    A[User uploads PDF/TXT or submits URL] --> B[Backend validates input]
+    B --> B1{PDF upload?}
+    B1 -->|Yes| B2[Validate magic bytes and file size]
+    B1 -->|No, URL| B3[SSRF guard: block private IPs, metadata endpoints, sensitive ports]
+    B2 --> C[Save file to /tmp/uploads shared volume]
+    B3 --> C2[Enqueue crawl job]
+    C --> C1[Enqueue file job]
+    C1 --> D[Return 202 Accepted with job_id]
+    C2 --> D
 
-Documents go through a multi-stage pipeline before they can be queried:
+    D --> E[Frontend polls GET /jobs/job_id]
 
-1. **Text Extraction** -- PDF files are parsed with PyPDF2 (page by page). URLs are rendered with a headless Chromium browser via Playwright, which handles JavaScript-heavy pages and auto-expands collapsed sections.
+    D --> F[Worker dequeues job from Redis]
+    F --> G{Job type}
+    G -->|File| H[Extract text with PyPDF2]
+    G -->|URL| I[Render page with Playwright headless Chromium]
+    H --> J[Split text: RecursiveCharacterTextSplitter - 1200 chars, 200 overlap]
+    I --> J
+    J --> K[Generate embeddings: text-embedding-3-small - 1536 dimensions]
+    K --> L[Store chunks + vectors + metadata in PostgreSQL pgvector]
+    L --> M[Mark job complete in Redis]
+    M --> E
 
-2. **Chunking** -- The extracted text is split using LangChain's `RecursiveCharacterTextSplitter`. It recursively tries splitting on paragraph breaks, then line breaks, then spaces, preserving semantic boundaries. Each chunk is 1200 characters with 200 characters of overlap to prevent context loss at boundaries.
+    E --> N[User asks a question]
+    N --> O[Embed question via OpenAI - cached in Redis]
 
-3. **Embedding** -- Each chunk is sent to OpenAI's `text-embedding-3-small` model, which returns a 1536-dimensional vector representing the semantic meaning of that text.
+    O --> P[Semantic search: cosine similarity via HNSW index]
+    O --> Q[Keyword search: tsvector + ts_rank via GIN index]
 
-4. **Storage** -- Chunks, their vectors, and source metadata are stored in PostgreSQL using the pgvector extension. An HNSW index (m=16, ef_construction=64) enables fast approximate nearest-neighbor search. A GIN index on a generated `tsvector` column enables full-text keyword search.
+    P --> R[Reciprocal Rank Fusion - k=60]
+    Q --> R
+    R --> S[Top 5 results formatted as context]
+    S --> T[GPT-4o-mini generates answer - temperature 0.1]
+    T --> U[Stream tokens via SSE to frontend]
+```
 
-### Hybrid Search
+**Ingestion stages:**
 
-When a user asks a question, the system runs two parallel searches:
+1. Input validation -- The backend checks file size (max 5MB), validates PDF files by inspecting the first 5 bytes for the `%PDF-` magic header, and runs SSRF checks on URLs (blocking private IPs, loopback, cloud metadata endpoints, and sensitive ports).
+2. Background processing -- The job is enqueued in Redis and picked up by the RQ worker. The worker publishes granular progress steps (text extraction word count, chunk count, embedding progress, HNSW index confirmation) that the frontend polls and displays in real time.
+3. Text extraction -- PDFs are parsed page-by-page with PyPDF2. URLs are rendered with headless Chromium via Playwright, which handles JavaScript-heavy pages and auto-expands collapsed sections.
+4. Chunking -- LangChain's `RecursiveCharacterTextSplitter` splits text into 1200-character chunks with 200-character overlap, trying paragraph breaks first, then line breaks, then spaces.
+5. Embedding and storage -- Each chunk is embedded with `text-embedding-3-small` (1536 dimensions) and stored in PostgreSQL with pgvector. An HNSW index (m=16, ef_construction=64) is built for vector search, and a GIN index on the generated `tsvector` column enables keyword search.
 
-- **Semantic Search** -- The question is embedded into the same vector space and compared against stored chunks using cosine similarity. This finds conceptually related content even when different words are used.
+**Query stages:**
 
-- **Keyword Search** -- PostgreSQL's full-text search matches exact terms, acronyms, technical identifiers, and proper nouns that vector similarity might miss.
+1. The question is embedded (with Redis caching) and two parallel searches run against the user's collection.
+2. Results are merged with Reciprocal Rank Fusion and the top 5 are formatted into a context block.
+3. GPT-4o-mini streams the answer token-by-token via SSE, with sources sent as the first event.
 
-Results from both searches are combined using **Reciprocal Rank Fusion (RRF)** with k=60. Each document receives a score of `1/(k + rank)` from each search method, and scores are summed. This consistently outperforms either method alone.
+---
 
-### Answer Generation
+## Hybrid Search Algorithm
 
-The top 5 results are formatted into a context block and sent to GPT-4o-mini (temperature=0.1) along with the system prompt and the last 10 messages of conversation history. The system prompt strictly constrains the model to only answer from the provided context and cite its sources.
+The system combines two complementary search strategies and merges their results with Reciprocal Rank Fusion.
 
-### Streaming Responses
+**Semantic search** embeds the user's question into the same 1536-dimensional vector space as the stored document chunks, then finds the nearest neighbors using cosine similarity over the HNSW index. This captures meaning, synonyms, and paraphrases -- a query about "revenue growth" will match chunks discussing "increased sales" even though the words differ.
 
-Answers are streamed token-by-token via Server-Sent Events (SSE) through the `/chat/ask/stream` endpoint. The backend sends three event types in order:
+**Keyword search** uses PostgreSQL's built-in full-text search. A generated `tsvector` column stores the tokenized, stemmed form of each chunk. The query is converted to a `tsquery` and matched against this column, ranked by `ts_rank_cd`. This catches exact terms, acronyms, technical identifiers, and proper nouns that vector similarity tends to miss.
 
-1. `event: sources` -- JSON array of retrieved source objects (sent immediately after hybrid search completes)
-2. `event: token` -- Individual text chunks as they are generated by the LLM
-3. `event: done` -- Signals the stream is complete
+**Reciprocal Rank Fusion (RRF)** merges both result lists into a single ranked output. Each document receives a score of `1 / (k + rank)` from each search method where it appears (k=60, the standard value from the literature). Scores are summed across methods, and the final list is sorted by combined score. RRF is robust to score-scale differences between the two methods and consistently outperforms either method alone. The system fetches `3 * top_k` candidates from each method before fusion, then returns the top 5 after merging.
 
-This gives the user immediate visual feedback as the response forms, rather than waiting for the full generation.
-
-### Pipeline Visibility
-
-During document ingestion, the worker publishes granular progress steps to Redis. The frontend polls for these steps and renders them in real time:
-
-- Text extraction (word count, page count)
-- Recursive chunking (chunk count, size, overlap)
-- Embedding generation (chunk progress)
-- Vector storage (HNSW index confirmation)
-
-### Search Comparison
-
-The `/analysis/search-comparison` endpoint runs all three search strategies on the same query and returns results side-by-side with relevance scores. The UI renders them in three columns so users can see:
-
-- **Semantic search** -- What vector cosine similarity finds
-- **Keyword search** -- What PostgreSQL full-text search finds
-- **Hybrid (RRF)** -- How Reciprocal Rank Fusion merges both
-
-### Embedding Visualization
-
-The `/analysis/embeddings-2d` endpoint performs PCA dimensionality reduction (1536 dimensions to 2) on all of a user's document chunk embeddings using SVD. The frontend renders these as an interactive scatter plot where each point is a text chunk, colored by source document. Hovering reveals the chunk preview. Nearby points are semantically similar.
-
-### Embedding Cache
-
-Query embeddings are cached in Redis with a configurable TTL (default: 1 hour). The cache key is a SHA256 hash of the normalized query. This reduces OpenAI API calls for repeated or similar questions.
+If keyword search returns no matches (common for very short or abstract queries), the system falls back to semantic-only results.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Frontend | Next.js 15, React 19, TypeScript | Server-side rendered UI with standalone build |
-| UI Components | Radix UI, Tailwind CSS, Lucide Icons | Accessible component library with utility-first styling |
-| Authentication | Clerk | Managed auth with JWT (RS256), social login support |
-| Backend | FastAPI, Python 3.11 | Async API with automatic OpenAPI docs |
-| LLM | GPT-4o-mini via LangChain | Answer generation with conversation memory |
-| Embeddings | text-embedding-3-small (1536 dims) | Semantic vector representations |
-| Vector Database | PostgreSQL 16 + pgvector | HNSW index for vector search, GIN index for full-text |
-| Job Queue | Redis + RQ (Redis Queue) | Background processing with retry and backoff |
-| Web Crawler | Playwright (headless Chromium) | JavaScript-rendered page content extraction |
-| Rate Limiting | slowapi | Per-user and per-IP request throttling |
-| Reverse Proxy | Traefik v3 | TLS termination, security headers, routing |
-| Containerization | Docker Compose | Five-service orchestration with health checks |
+| Component | Technology | Role |
+|---|---|---|
+| Frontend | Next.js 15, React 19, TypeScript | SSR UI with standalone Docker build, API proxy via rewrites |
+| UI | Radix UI, Tailwind CSS, Lucide Icons | Accessible components with utility-first styling |
+| Authentication | Clerk | Managed auth with JWT (RS256), JWKS verification, social login |
+| Backend | FastAPI, Python 3.11 | Async API with OpenAPI docs, JWT middleware, rate limiting |
+| LLM | GPT-4o-mini via LangChain | Answer generation with conversation history (last 10 messages) |
+| Embeddings | text-embedding-3-small | 1536-dimensional semantic vectors |
+| Vector database | PostgreSQL 16 + pgvector | HNSW index for vector search, GIN index for full-text search |
+| Job queue | Redis 7 + RQ | Background job processing with progress tracking |
+| Web crawler | Playwright (headless Chromium) | JavaScript-rendered page extraction with SSRF protection |
+| Rate limiting | slowapi | Per-user and per-IP request throttling |
+| Reverse proxy | Traefik v3 | TLS termination via Let's Encrypt, HSTS, security headers |
+| Containerization | Docker Compose | Five-service orchestration with health checks and resource limits |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Docker and Docker Compose
+- An OpenAI API key with credits
+- A Clerk application (free tier works)
+- A domain with DNS pointing to your server (for HTTPS via Traefik)
+- Traefik reverse proxy running with the `proxy` Docker network
+
+### Environment Variables
+
+Create a `.env` file in the project root with the following required variables:
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI API key for embeddings and chat |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk publishable key (starts with `pk_`) |
+| `CLERK_SECRET_KEY` | Clerk secret key (starts with `sk_`) |
+| `POSTGRES_PASSWORD` | PostgreSQL password (generate a strong random value) |
+
+Optional variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLERK_JWKS_URL` | Clerk API fallback | JWKS endpoint for JWT verification |
+| `POSTGRES_USER` | `ragcrawler` | PostgreSQL username |
+| `POSTGRES_DB` | `ragdb` | PostgreSQL database name |
+
+The following are set automatically by `docker-compose.yml` and should not be overridden: `DATABASE_URL`, `REDIS_URL`, `CLERK_AUTHORIZED_PARTIES`, `NEXT_PUBLIC_API_URL`, `BACKEND_INTERNAL_URL`, `ENVIRONMENT`.
+
+### Running with Docker
+
+```bash
+# Clone the repository
+git clone <repository-url> /opt/showcase/RAG-Crawler
+cd /opt/showcase/RAG-Crawler
+
+# Create and fill .env
+cp .env.example .env
+
+# Build and start all five containers
+docker compose up -d --build
+
+# First build takes 5-10 minutes (Playwright installs Chromium, Next.js compiles)
+
+# Verify all containers are healthy
+docker compose ps
+
+# Check backend health
+docker exec ragcrawler-backend curl -s http://127.0.0.1:8000/health | python3 -m json.tool
+```
 
 ---
 
@@ -248,210 +172,37 @@ Query embeddings are cached in Redis with a configurable TTL (default: 1 hour). 
 
 All endpoints except `/` and `/health` require a valid Clerk JWT in the `Authorization: Bearer <token>` header.
 
-| Method | Endpoint | Rate Limit | Description |
-|--------|----------|-----------|-------------|
-| `GET` | `/` | -- | API version info |
-| `GET` | `/health` | -- | Health check (database, Redis, worker, OpenAI status) |
-| `GET` | `/auth/me` | -- | Verify authentication, returns user ID |
-| `POST` | `/ingest/upload` | 10/hour | Upload PDF or TXT file (max 5MB). Returns `job_id` |
-| `POST` | `/ingest/crawl` | 10/hour | Submit URL for crawling. Returns `job_id` |
-| `GET` | `/jobs/{job_id}` | -- | Check background job status |
-| `GET` | `/chat/documents` | -- | Get document count and upload limits |
-| `POST` | `/chat/ask` | 20/minute | Ask a question (non-streaming) |
-| `POST` | `/chat/ask/stream` | 20/minute | Ask a question via SSE (token-by-token streaming) |
-| `POST` | `/chat/reset` | -- | Delete all indexed documents for current user |
-| `POST` | `/analysis/search-comparison` | 20/minute | Run semantic, keyword, and hybrid search side-by-side |
-| `GET` | `/analysis/embeddings-2d` | 10/minute | Get PCA 2D projection of all user embedding vectors |
-| `POST` | `/admin/clear-data` | -- | Clear all user data |
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | API version info |
+| `GET` | `/health` | Health check (database, Redis, worker, OpenAI status) |
+| `GET` | `/auth/me` | Verify authentication, returns user ID |
+| `POST` | `/ingest/upload` | Upload PDF or TXT file (max 5MB), returns `job_id` |
+| `POST` | `/ingest/crawl` | Submit URL for crawling, returns `job_id` |
+| `GET` | `/jobs/{job_id}` | Check background job status and progress steps |
+| `GET` | `/chat/documents` | Get document count and upload limits |
+| `POST` | `/chat/ask` | Ask a question (non-streaming response) |
+| `POST` | `/chat/ask/stream` | Ask a question via SSE (token-by-token streaming) |
+| `POST` | `/chat/reset` | Delete all indexed documents for current user |
+| `POST` | `/analysis/search-comparison` | Run semantic, keyword, and hybrid search side-by-side |
+| `GET` | `/analysis/embeddings-2d` | Get PCA 2D projection of all user embedding vectors |
+| `POST` | `/admin/clear-data` | Clear all user data |
 
-### Showcase Limits
+---
+
+## Rate Limits
 
 This deployment runs in showcase mode with intentional constraints:
 
-- Maximum 5 documents per user
-- Maximum 5MB per file
-- Accepted formats: PDF, TXT
-- User data auto-deleted after 10 minutes of inactivity
-- Upload rate: 10 per hour
-- Chat rate: 20 questions per minute
+| Constraint | Limit |
+|---|---|
+| Documents per user | 5 |
+| File size | 5MB |
+| Accepted formats | PDF, TXT |
+| Inactivity auto-cleanup | 10 minutes |
+| Upload/crawl rate | 10 per hour per user |
+| Chat rate | 20 per minute per IP |
+| Analysis (search comparison) | 20 per minute |
+| Analysis (embeddings 2D) | 10 per minute |
 
----
-
-## Security
-
-### Authentication and Authorization
-
-- Clerk-issued JWTs verified via JWKS (RS256 signature validation)
-- Authorized party (`azp`) claim checked against configured whitelist
-- Per-user data isolation via separate pgvector collections (`user_{clerk_id}`)
-- Job ownership validation prevents cross-user data access
-
-### Input Validation
-
-- File size enforced server-side (5MB hard limit)
-- Question length validated via Pydantic (1-2000 characters)
-- URL crawling protected against SSRF: blocks private IPs, loopback addresses, cloud metadata endpoints (169.254.169.254), and sensitive ports (SSH, SMTP, database ports)
-
-### Infrastructure
-
-- HTTPS-only via Traefik with auto-renewed Let's Encrypt certificates
-- Security headers: HSTS (1 year, preload), X-Frame-Options DENY, X-Content-Type-Options nosniff, strict Referrer-Policy, Permissions-Policy
-- Backend CSP: `default-src 'none'; frame-ancestors 'none'`
-- PostgreSQL and Redis on isolated Docker network (not exposed to host)
-- Frontend runs as non-root user in container
-- Connection pooling with pre-ping validation and 5-minute recycling
-- Global exception handler suppresses stack traces in production
-
-### Rate Limiting
-
-- Upload and crawl: 10 requests per hour per user
-- Chat: 20 requests per minute per IP
-- Rate limit key falls back to IP address if JWT is invalid
-
----
-
-## Project Structure
-
-```
-RAG-Crawler/
-|-- docker-compose.yml              # 5-service orchestration
-|-- .env                             # Secrets (not committed)
-|
-|-- backend/
-|   |-- Dockerfile                   # Python 3.11 + Playwright
-|   |-- requirements.txt
-|   |-- app/
-|       |-- main.py                  # FastAPI app, middleware, health check
-|       |-- config.py                # Environment settings (Pydantic)
-|       |-- database.py              # SQLAlchemy engine with connection pool
-|       |-- schemas.py               # Request/response models
-|       |-- security.py              # Auth dependency injection
-|       |-- clerk_auth.py            # JWT verification via JWKS
-|       |-- pgvector_store.py        # Vector DB, hybrid search, RRF
-|       |-- rag.py                   # LLM pipeline with chat history
-|       |-- crawler.py               # Playwright browser pool, SSRF guard
-|       |-- ingestion.py             # PDF/TXT parsing, chunking
-|       |-- tasks.py                 # RQ job definitions and queue
-|       |-- background.py            # APScheduler for periodic cleanup
-|       |-- user_activity.py         # Inactivity tracking and auto-cleanup
-|       |-- embedding_cache.py       # Redis-backed embedding cache
-|       |-- routers/
-|           |-- auth.py              # GET /auth/me
-|           |-- ingest.py            # POST /ingest/upload, /ingest/crawl
-|           |-- chat.py              # POST /chat/ask, /chat/ask/stream, GET /chat/documents
-|           |-- jobs.py              # GET /jobs/{job_id} (with progress steps)
-|           |-- analysis.py          # POST /analysis/search-comparison, GET /analysis/embeddings-2d
-|           |-- admin.py             # POST /admin/clear-data
-|
-|-- frontend/
-    |-- Dockerfile                   # Next.js standalone build
-    |-- next.config.mjs              # API rewrite proxy to backend
-    |-- middleware.ts                 # Clerk auth middleware
-    |-- lib/
-    |   |-- api.ts                   # API client with JWT and polling
-    |-- app/
-    |   |-- layout.tsx               # Root layout with ClerkProvider
-    |   |-- page.tsx                 # Landing page
-    |   |-- dashboard/page.tsx       # Protected dashboard
-    |   |-- sign-in/page.tsx         # Clerk sign-in
-    |   |-- sign-up/page.tsx         # Clerk sign-up
-    |-- components/
-        |-- dashboard-content.tsx    # Main dashboard state management
-        |-- upload-section.tsx       # File upload and URL indexing with pipeline visibility
-        |-- chat-section.tsx         # Chat interface with SSE streaming
-        |-- analysis-panel.tsx       # Search comparison and embedding visualization
-        |-- ui/                      # Radix UI component library
-```
-
----
-
-## Setup and Deployment
-
-### Prerequisites
-
-- Docker and Docker Compose
-- A Clerk application (free tier works)
-- An OpenAI API key with credits
-- A domain with DNS pointing to your server (for HTTPS)
-- Traefik reverse proxy with the `proxy` Docker network
-
-### 1. Clone and configure
-
-```bash
-git clone <repository-url> /opt/showcase/RAG-Crawler
-cd /opt/showcase/RAG-Crawler
-```
-
-### 2. Set environment variables
-
-```bash
-cp .env.example .env   # if available, otherwise edit .env directly
-```
-
-Fill in the required values (see [Environment Variables](#environment-variables) below).
-
-### 3. Deploy
-
-```bash
-docker compose up -d --build
-```
-
-The first build takes 5-10 minutes (Playwright installs Chromium, Next.js compiles).
-
-### 4. Verify
-
-```bash
-# Check all containers are healthy
-docker compose ps
-
-# Check backend health
-docker exec ragcrawler-backend curl -s http://127.0.0.1:8000/health | python3 -m json.tool
-
-# Verify SSL certificate
-echo | openssl s_client -connect ragcrawler.pgdev.com.br:443 2>/dev/null | openssl x509 -noout -subject -issuer
-
-# Verify security headers
-curl -sI https://ragcrawler.pgdev.com.br | grep -iE "strict-transport|x-frame|x-content"
-```
-
----
-
-## Environment Variables
-
-All variables are set in the root `.env` file and consumed by Docker Compose.
-
-### Required
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key for embeddings and chat |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk publishable key (starts with `pk_`) |
-| `CLERK_SECRET_KEY` | Clerk secret key (starts with `sk_`) |
-| `POSTGRES_PASSWORD` | PostgreSQL password (generate a strong random value) |
-
-### Optional
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLERK_JWKS_URL` | Clerk API fallback | JWKS endpoint for JWT verification |
-| `POSTGRES_USER` | `ragcrawler` | PostgreSQL username |
-| `POSTGRES_DB` | `ragdb` | PostgreSQL database name |
-
-### Set by Docker Compose (do not override)
-
-These are configured in `docker-compose.yml` and should not be changed in `.env`:
-
-| Variable | Value | Description |
-|----------|-------|-------------|
-| `DATABASE_URL` | Built from PG vars | PostgreSQL connection string |
-| `REDIS_URL` | `redis://redis:6379/0` | Redis connection |
-| `CLERK_AUTHORIZED_PARTIES` | `https://ragcrawler.pgdev.com.br` | JWT authorized party validation |
-| `NEXT_PUBLIC_API_URL` | `/api` | Frontend API base URL (proxied to backend) |
-| `BACKEND_INTERNAL_URL` | `http://backend:8000` | Internal backend URL for Next.js rewrites |
-| `ENVIRONMENT` | `production` | Enables JSON logging, hides error details |
-
----
-
-## License
-
-This project is a portfolio showcase. All rights reserved.
+The dashboard UX adapts in two phases: Phase 1 shows the upload interface when no documents exist, and Phase 2 switches to chat and analysis tabs with a collapsible upload panel once documents are indexed.
