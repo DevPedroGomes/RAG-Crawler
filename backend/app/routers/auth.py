@@ -1,25 +1,21 @@
 """
-Auth Router - Clerk Integration
+Auth Router — Better Auth bridge.
 
-Clerk handles all authentication (signup, login, logout) via frontend components.
-This router only provides a way to verify the current user.
+Better Auth handles signup/login/logout in the Next.js frontend. This
+router only verifies the active session and returns user info.
 """
 from fastapi import APIRouter, Depends
-from ..clerk_auth import require_clerk_auth
+from ..auth import get_current_user as resolve_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/me")
-def get_current_user(user_id: str = Depends(require_clerk_auth)):
-    """
-    Returns current authenticated user info.
-
-    Clerk handles login/signup/logout via frontend components.
-    This endpoint verifies the JWT and returns the user ID.
-    """
+def me(user: dict = Depends(resolve_current_user)):
     return {
         "ok": True,
-        "user_id": user_id,
-        "message": "Authenticated via Clerk"
+        "user_id": user["id"],
+        "email": user["email"],
+        "name": user.get("name"),
+        "message": "Authenticated via Better Auth",
     }

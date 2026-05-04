@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from ..security import require_auth
-from ..clerk_auth import get_token_from_header, verify_clerk_token
+from ..auth import get_user_id_for_rate_limit
 from ..tasks import enqueue_file_task, enqueue_url_task
 from ..crawler import is_safe_url
 from ..pgvector_store import get_unique_source_count
@@ -9,20 +9,6 @@ import tempfile
 import os
 import threading
 from slowapi import Limiter
-
-
-def get_user_id_for_rate_limit(request: Request) -> str:
-    """
-    Extract user_id from Clerk JWT for rate limiting.
-    Falls back to IP address if token is invalid/missing.
-    """
-    try:
-        token = get_token_from_header(request)
-        payload = verify_clerk_token(token)
-        return f"user:{payload.get('sub', 'unknown')}"
-    except Exception:
-        # Fallback to IP if auth fails (rate limit will still apply)
-        return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
@@ -86,7 +72,7 @@ async def upload(
     Upload document for background indexing.
 
     Returns immediately with job_id. Use GET /jobs/{job_id} to check status.
-    Requires Clerk JWT authentication.
+    Requires an authenticated session (Better Auth cookie).
     Rate limited to 10 uploads per hour per user.
     Maximum file size: 5MB. Maximum 5 documents per user.
     """
@@ -145,7 +131,7 @@ async def crawl(
     Queue URL for background crawling and indexing.
 
     Returns immediately with job_id. Use GET /jobs/{job_id} to check status.
-    Requires Clerk JWT authentication.
+    Requires an authenticated session (Better Auth cookie).
     Rate limited to 10 crawls per hour per user.
     Maximum 5 documents per user.
     """

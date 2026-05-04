@@ -1,4 +1,5 @@
-import { auth } from "@clerk/nextjs/server"
+import { auth } from "@/lib/auth-server"
+import { headers } from "next/headers"
 import { redirect } from "next/navigation"
 import {
   Brain, FileText, Search, Cpu, Database, MessageSquare,
@@ -55,9 +56,9 @@ function FeatureCard({
 }
 
 export default async function HomePage() {
-  const { userId } = await auth()
+  const session = await auth.api.getSession({ headers: await headers() })
 
-  if (userId) {
+  if (session?.user) {
     redirect("/dashboard")
   }
 
@@ -148,7 +149,7 @@ export default async function HomePage() {
           <FeatureCard
             icon={Shield}
             title="Multi-Tenant Security"
-            description="Clerk JWT authentication, per-user data isolation, SSRF protection on URLs, rate limiting, and automatic cleanup of inactive sessions."
+            description="Better Auth (httpOnly cookies + Google OAuth), per-user data isolation, SSRF protection on URLs, rate limiting, and automatic cleanup of inactive sessions."
           />
         </div>
       </section>
@@ -254,7 +255,7 @@ export default async function HomePage() {
             { label: "Backend", tech: "FastAPI, Python 3.11, LangChain" },
             { label: "Database", tech: "PostgreSQL 16, pgvector, Redis" },
             { label: "AI Models", tech: "GPT-4o-mini, text-embedding-3-small" },
-            { label: "Auth", tech: "Clerk (JWT RS256)" },
+            { label: "Auth", tech: "Better Auth (cookies + Google OAuth)" },
             { label: "Crawler", tech: "Playwright (headless Chromium)" },
             { label: "Queue", tech: "Redis Queue (RQ) + workers" },
             { label: "Deploy", tech: "Docker Compose, Traefik" },

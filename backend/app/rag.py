@@ -23,9 +23,32 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def _get_llm() -> ChatOpenAI:
-    """Get cached LLM instance (singleton)."""
+    """Get cached LLM instance (singleton).
+
+    LLM_PROVIDER=openrouter routes through OpenRouter (multi-provider). Default
+    stays "openai" so existing behavior is preserved. Embeddings continue
+    talking to OpenAI directly via OPENAI_API_KEY (handled in pgvector_store).
+    """
+    provider = (settings.LLM_PROVIDER or "openai").lower()
+    if provider == "openrouter":
+        if not settings.OPENROUTER_API_KEY:
+            raise ValueError(
+                "LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is not set."
+            )
+        return ChatOpenAI(
+            model=settings.LLM_MODEL,
+            temperature=0.1,
+            api_key=settings.OPENROUTER_API_KEY,
+            base_url=settings.OPENROUTER_BASE_URL,
+            timeout=60,
+            max_retries=1,
+            default_headers={
+                "HTTP-Referer": "https://ragcrawler.pgdev.com.br",
+                "X-Title": "qa-pgdev rag-crawler",
+            },
+        )
     return ChatOpenAI(
-        model="gpt-4o-mini",
+        model=settings.LLM_MODEL,
         temperature=0.1,
         api_key=settings.OPENAI_API_KEY,
         timeout=60,
@@ -168,40 +191,54 @@ def answer_stream(question: str, user_id: str, chat_history: Optional[List[dict]
       event: token    -> text chunk from LLM
       event: done     -> signals completion
       event: error    -> error message
+
+    Robust contract: regardless of how this generator exits (normal,
+    exception, retrieval miss), exactly one `done` event is emitted at the
+    end. Without that the frontend stream consumer hangs forever waiting
+    for the terminal event.
     """
     import json
 
-    docs, err = _retrieve_docs(question, user_id)
-    if err:
-        yield f"event: error\ndata: {json.dumps({'message': err['answer']})}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
-        return
+    # Flush a comment immediately so Traefik/Next.js stop buffering and the
+    # client opens its EventSource pipe before we do slow retrieval work.
+    yield ": stream-open\n\n"
 
-    sources = _extract_sources(docs)
-    yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
-
-    ctx = _format_docs(docs)
-    history_messages = _convert_chat_history(chat_history)
-    llm = _get_llm()
-    prompt_messages = _PROMPT.format_messages(
-        context=ctx, chat_history=history_messages, question=question
-    )
-
+    error_event = None
     try:
-        for chunk in llm.stream(prompt_messages):
-            if chunk.content:
-                yield f"event: token\ndata: {json.dumps({'text': chunk.content})}\n\n"
-    except RateLimitError:
-        yield f"event: error\ndata: {json.dumps({'message': 'The AI service is currently rate-limited.'})}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
-        return
-    except (APIConnectionError, APITimeoutError):
-        yield f"event: error\ndata: {json.dumps({'message': 'The AI service is temporarily unavailable.'})}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
-        return
-    except APIError:
-        yield f"event: error\ndata: {json.dumps({'message': 'An error occurred while generating the response.'})}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
-        return
+        docs, err = _retrieve_docs(question, user_id)
+        if err:
+            error_event = err.get("answer") or "Retrieval failed."
+            return
 
-    yield f"event: done\ndata: {{}}\n\n"
+        sources = _extract_sources(docs)
+        yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+
+        ctx = _format_docs(docs)
+        history_messages = _convert_chat_history(chat_history)
+        llm = _get_llm()
+        prompt_messages = _PROMPT.format_messages(
+            context=ctx, chat_history=history_messages, question=question
+        )
+
+        try:
+            for chunk in llm.stream(prompt_messages):
+                if chunk.content:
+                    yield f"event: token\ndata: {json.dumps({'text': chunk.content})}\n\n"
+        except RateLimitError:
+            error_event = "The AI service is currently rate-limited. Try again in a moment."
+        except (APIConnectionError, APITimeoutError):
+            error_event = "The AI service is temporarily unavailable."
+        except APIError as e:
+            logger.error(f"OpenAI/OpenRouter API error during stream: {e}")
+            error_event = "An error occurred while generating the response."
+        except Exception as e:  # noqa: BLE001 — broadly catch so we always emit done
+            logger.exception("Unexpected error during LLM stream")
+            error_event = f"Unexpected error: {type(e).__name__}"
+
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Unexpected error in answer_stream pre-LLM phase")
+        error_event = f"Unexpected error: {type(e).__name__}"
+    finally:
+        if error_event:
+            yield f"event: error\ndata: {json.dumps({'message': error_event})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"

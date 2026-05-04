@@ -3,7 +3,7 @@ import time
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -16,6 +16,7 @@ from .routers import auth, ingest, chat, admin, jobs, analysis
 from .background import start_background_tasks, stop_background_tasks
 from .crawler import BrowserPool
 from .pgvector_store import init_pgvector
+from .security import require_auth
 
 # Configure logging — JSON in production, plaintext in dev
 if settings.ENVIRONMENT == "production":
@@ -33,6 +34,17 @@ else:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 logger = logging.getLogger(__name__)
+
+# Startup sanity: Better Auth requires a shared Postgres URL with the Next.js
+# frontend. In production the URL must NOT point at localhost.
+if settings.ENVIRONMENT == "production" and (
+    "localhost" in settings.DATABASE_URL or "127.0.0.1" in settings.DATABASE_URL
+):
+    logger.critical(
+        "CONFIG MISMATCH: ENVIRONMENT=production but DATABASE_URL still points "
+        "at localhost. Better Auth sessions live in Postgres and must be on the "
+        "shared cluster used by the Next.js frontend. Fix DATABASE_URL and restart."
+    )
 
 # Cria as tabelas do banco de dados
 Base.metadata.create_all(bind=engine)
@@ -73,15 +85,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PG Multiuser RAG",
-    description="Sistema RAG multiusuário com autenticação via Clerk JWT",
-    lifespan=lifespan
+    description="Sistema RAG multiusuário com autenticação via Better Auth (cookies)",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
+    redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
+    openapi_url="/openapi.json" if settings.ENVIRONMENT != "production" else None,
 )
 
 # Adicionar rate limiter ao app
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Configurar CORS para Clerk JWT auth
+# CORS — same-origin via Next.js rewrite; explicit origins kept for non-proxy access
 cors_origins = ["https://ragcrawler.pgdev.com.br"]
 # Dev/extra origins via env var (comma-separated), e.g. CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 extra_origins = os.environ.get("CORS_ORIGINS", "")
@@ -137,7 +152,7 @@ async def log_requests(request: Request, call_next):
     duration_ms = (time.time() - start_time) * 1000
 
     # Skip logging health checks to reduce noise
-    if request.url.path != "/health":
+    if request.url.path not in ("/health", "/health/detailed"):
         logger.info(
             "request",
             extra={
@@ -174,8 +189,17 @@ app.include_router(analysis.router)
 @app.get("/health")
 def health():
     """
-    Health check endpoint.
-    Returns status of all dependencies.
+    Public health check — minimal liveness probe.
+    Returns only {"status": "ok"}; no internal state is leaked.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/health/detailed")
+def health_detailed(user_id: str = Depends(require_auth)):
+    """
+    Detailed health check — exposes dependency state.
+    Auth-gated to avoid leaking internal topology to anonymous callers.
     """
     from redis import Redis
     from sqlalchemy import text
@@ -226,11 +250,8 @@ def health():
         return JSONResponse(status_code=503, content=health_status)
     return health_status
 
+
 @app.get("/")
 def root():
-    """Endpoint raiz"""
-    return {
-        "message": "PG Multiuser RAG API",
-        "version": "3.0.0",
-        "auth": "Clerk JWT"
-    }
+    """Endpoint raiz — banner mínimo (sem versão/auth method)"""
+    return {"message": "ok"}

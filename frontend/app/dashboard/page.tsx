@@ -1,12 +1,13 @@
-import { auth } from "@clerk/nextjs/server"
+import { auth } from "@/lib/auth-server"
+import { headers } from "next/headers"
 import { redirect } from "next/navigation"
-import { UserButton } from "@clerk/nextjs"
 import { DashboardContent } from "@/components/dashboard-content"
+import { UserMenu } from "@/components/user-menu"
 
 export default async function DashboardPage() {
-  const { userId } = await auth()
+  const session = await auth.api.getSession({ headers: await headers() })
 
-  if (!userId) {
+  if (!session?.user) {
     redirect("/sign-in")
   }
 
@@ -18,7 +19,7 @@ export default async function DashboardPage() {
             <img src="/logo.png" alt="Logo" className="h-8 w-8 rounded-lg object-cover" />
             <span className="font-semibold tracking-tight text-neutral-900">RAG Assistant</span>
           </div>
-          <UserButton afterSignOutUrl="/" />
+          <UserMenu name={session.user.name} email={session.user.email} />
         </div>
       </header>
 

@@ -1,7 +1,8 @@
 """
 Pydantic Schemas
 
-Authentication schemas (SignUpIn, TokenOut) removed - Clerk handles auth.
+Authentication schemas removed — Better Auth manages users/sessions in the
+Next.js layer; the Python backend only validates session cookies.
 """
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal

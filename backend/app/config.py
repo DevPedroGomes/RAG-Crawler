@@ -22,12 +22,20 @@ class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     REDIS_URL: str = os.getenv("REDIS_URL", "")
 
-    # ==== Clerk Authentication ====
-    # JWKS URL for your Clerk instance (optional, defaults to Clerk API)
-    CLERK_JWKS_URL: str = os.getenv("CLERK_JWKS_URL", "")
-    # Comma-separated list of authorized parties (azp) - your frontend URLs
-    # Example: "http://localhost:3000,https://myapp.com"
-    CLERK_AUTHORIZED_PARTIES: str = os.getenv("CLERK_AUTHORIZED_PARTIES", "")
+    # ==== LLM Provider (chat completions only) ====
+    # OpenAI-compatible. When LLM_PROVIDER=openrouter, the chat client points at
+    # OpenRouter and LLM_MODEL is the OpenRouter id (e.g. "deepseek/deepseek-chat").
+    # Embeddings ALWAYS go through OpenAI (OpenRouter does not host embeddings).
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+    # ==== Better Auth ====
+    # Sessions live in Postgres (managed by the Next.js frontend). The Python
+    # backend reads the cookie ``__Secure-better-auth.session_token`` (or its
+    # non-secure variant) and resolves the user via SQL — see app/auth.py.
+    # No secret is needed here because we don't sign anything; we only read.
 
     # ==== RAG Settings ====
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -78,4 +86,4 @@ settings = Settings()
 logger.info(f"Environment: {settings.ENVIRONMENT}")
 logger.info(f"Database configured: {bool(settings.DATABASE_URL)}")
 logger.info(f"Redis configured: {bool(settings.REDIS_URL)}")
-logger.info(f"Clerk authorized parties: {settings.CLERK_AUTHORIZED_PARTIES or 'not configured (accepting all)'}")
+logger.info("Auth: Better Auth (cookie-based sessions via shared Postgres)")

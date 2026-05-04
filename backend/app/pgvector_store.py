@@ -277,18 +277,21 @@ def search_semantic(
         if not _table_exists(conn, "langchain_pg_embedding"):
             return []
 
-        # Semantic search using cosine distance
+        # Semantic search using cosine distance.
+        # NOTE: SQLAlchemy named-params (`:name`) collide with Postgres' `::cast`
+        # syntax inside text() — both use the colon. We use the SQL standard
+        # CAST(... AS ...) form to avoid the ambiguity.
         result = conn.execute(
             text("""
                 SELECT
                     e.id,
                     e.document as content,
                     e.cmetadata as metadata,
-                    1 - (e.embedding <=> :query_vector::vector) as score
+                    1 - (e.embedding <=> CAST(:query_vector AS vector)) as score
                 FROM langchain_pg_embedding e
                 JOIN langchain_pg_collection c ON e.collection_id = c.uuid
                 WHERE c.name = :collection_name
-                ORDER BY e.embedding <=> :query_vector::vector
+                ORDER BY e.embedding <=> CAST(:query_vector AS vector)
                 LIMIT :top_k
             """),
             {

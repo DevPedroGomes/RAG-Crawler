@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useState, useCallback } from "react"
-import { useAuth } from "@clerk/nextjs"
 import { UploadSection } from "@/components/upload-section"
 import { ChatSection } from "@/components/chat-section"
 import { AnalysisPanel } from "@/components/analysis-panel"
@@ -10,16 +9,14 @@ import { Upload, MessageSquare, BarChart3, Plus, X, Loader2 } from "lucide-react
 import { cn } from "@/lib/utils"
 
 export function DashboardContent() {
-  const { getToken } = useAuth()
+  // Better Auth uses httpOnly session cookies — fetch with `credentials: include`
+  // is enough; no Bearer token to manage in JS. The api client below was
+  // updated to add credentials: 'include' to every request.
   const [documentInfo, setDocumentInfo] = useState<DocumentCountResponse | null>(null)
   const [isCheckingDocuments, setIsCheckingDocuments] = useState(true)
   const [systemMessage, setSystemMessage] = useState<{ id: string; content: string } | null>(null)
   const [activeTab, setActiveTab] = useState<"chat" | "analyze">("chat")
   const [showUpload, setShowUpload] = useState(false)
-
-  useEffect(() => {
-    api.setTokenGetter(getToken)
-  }, [getToken])
 
   const checkDocuments = useCallback(async () => {
     try {

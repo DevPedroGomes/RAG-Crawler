@@ -2,16 +2,19 @@ import logging
 from fastapi import APIRouter, HTTPException, Body, Request, Depends
 from fastapi.responses import StreamingResponse
 from ..security import require_auth
+from ..auth import get_user_id_for_rate_limit
 from ..schemas import ChatIn, DocumentCountOut
 from ..rag import answer, answer_stream
 from ..pgvector_store import delete_user_documents, get_document_count, get_unique_source_count
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-limiter = Limiter(key_func=get_remote_address)
+# Rate-limit per authenticated user. Behind Next.js rewrite + Traefik, every
+# request appears to come from the same upstream IP, so an IP-based limiter
+# would put every user in the same bucket → spurious 429s.
+limiter = Limiter(key_func=get_user_id_for_rate_limit)
 
 
 from ..config import settings
@@ -56,7 +59,7 @@ def ask(
     The chat_history parameter allows the LLM to maintain context
     across multiple turns of conversation.
 
-    Requires Clerk JWT authentication.
+    Requires an authenticated session (Better Auth cookie).
     """
     try:
         # Convert chat history to list of dicts
@@ -103,7 +106,9 @@ def ask_stream(
         ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            # `no-cache, no-transform` is the magic combo that prevents
+            # Traefik / Next.js node fetch / browsers from buffering events.
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
@@ -118,7 +123,7 @@ def reset(
     """
     Delete all indexed documents for the current user.
 
-    Requires Clerk JWT authentication.
+    Requires an authenticated session (Better Auth cookie).
     """
     try:
         delete_user_documents(user_id)

@@ -6,7 +6,7 @@ from sqlalchemy import text as sql_text
 from .config import settings
 from .pgvector_store import get_vector_store
 from .database import engine
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 
 ProgressCallback = Optional[Callable[[str, str], None]]
 

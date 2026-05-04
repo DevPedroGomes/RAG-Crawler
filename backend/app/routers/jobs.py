@@ -24,7 +24,7 @@ def get_job(
         - result: Job result (if finished)
         - error: Error message (if failed)
 
-    Requires Clerk JWT authentication.
+    Requires an authenticated session (Better Auth cookie).
     Jobs are only visible to the user who created them.
     """
     # Pass user_id to validate job ownership

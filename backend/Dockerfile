@@ -14,6 +14,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Non-root user (Playwright base image already has /ms-playwright world-readable)
+RUN groupadd -r app -g 10001 && useradd -r -u 10001 -g app -d /app -s /sbin/nologin app && \
+    mkdir -p /tmp/pycache /home/app/.cache && \
+    chown -R app:app /app /tmp/pycache /home/app
+
+ENV PYTHONPYCACHEPREFIX=/tmp/pycache
+ENV HOME=/home/app
+
+USER app
+
 # Expose port
 EXPOSE 8000
 

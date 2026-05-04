@@ -1,8 +1,10 @@
 /**
  * API Client for RAG Backend
  *
- * Uses Clerk JWT for authentication via Authorization header.
- * CSRF tokens no longer needed with stateless JWT auth.
+ * Uses Better Auth httpOnly session cookies. The browser automatically
+ * sends them on every fetch when `credentials: 'include'` is set, so we
+ * don't manage tokens in JS. The backend (FastAPI) reads the cookie and
+ * resolves the user via SQL on the Better Auth `session` table.
  */
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
@@ -91,48 +93,37 @@ export interface StreamCallbacks {
   onError: (message: string) => void
 }
 
+/**
+ * If a request comes back 401, the Better Auth session expired or the cookie
+ * was cleared. Bounce to /sign-in so the user lands somewhere actionable
+ * instead of seeing a generic "Request failed: 401" toast.
+ */
+function redirectToSignInOn401(status: number): boolean {
+  if (status !== 401) return false
+  if (typeof window === "undefined") return false
+  const callback = window.location.pathname + window.location.search
+  window.location.href = `/sign-in?callbackUrl=${encodeURIComponent(callback)}`
+  return true
+}
+
 class ApiClient {
-  private getToken: (() => Promise<string | null>) | null = null
-
-  setTokenGetter(getter: () => Promise<string | null>) {
-    this.getToken = getter
-  }
-
-  private async getHeaders(): Promise<HeadersInit> {
+  private async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
     const headers: HeadersInit = {
       "Content-Type": "application/json",
+      ...(options.headers || {}),
     }
-
-    if (this.getToken) {
-      const token = await this.getToken()
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`
-      }
-    }
-
-    return headers
-  }
-
-  private async getBearerHeader(): Promise<HeadersInit> {
-    const headers: HeadersInit = {}
-    if (this.getToken) {
-      const token = await this.getToken()
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`
-      }
-    }
-    return headers
-  }
-
-  private async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
-    const headers = await this.getHeaders()
 
     const response = await fetch(url, {
+      credentials: "include",
       ...options,
-      headers: { ...headers, ...options.headers },
+      headers,
     })
 
     if (!response.ok) {
+      if (redirectToSignInOn401(response.status)) {
+        // Throw a sentinel so callers can swallow it (we'll already be navigating away).
+        throw new Error("Session expired — redirecting to sign-in")
+      }
       const error = await response.json().catch(() => ({
         detail: `HTTP error ${response.status}`,
       }))
@@ -146,15 +137,16 @@ class ApiClient {
     const formData = new FormData()
     formData.append("file", file)
 
-    const headers = await this.getBearerHeader()
-
     const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
       method: "POST",
-      headers,
+      credentials: "include",
       body: formData,
     })
 
     if (!response.ok && response.status !== 202) {
+      if (redirectToSignInOn401(response.status)) {
+        throw new Error("Session expired — redirecting to sign-in")
+      }
       const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
       throw new Error(error.detail || `Request failed: ${response.status}`)
     }
@@ -166,15 +158,16 @@ class ApiClient {
     const formData = new FormData()
     formData.append("url", url)
 
-    const headers = await this.getBearerHeader()
-
     const response = await fetch(`${API_BASE_URL}/ingest/crawl`, {
       method: "POST",
-      headers,
+      credentials: "include",
       body: formData,
     })
 
     if (!response.ok && response.status !== 202) {
+      if (redirectToSignInOn401(response.status)) {
+        throw new Error("Session expired — redirecting to sign-in")
+      }
       const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
       throw new Error(error.detail || `Request failed: ${response.status}`)
     }
@@ -218,7 +211,11 @@ class ApiClient {
   }
 
   /**
-   * Ask a question via streaming SSE (token-by-token response)
+   * Ask a question via streaming SSE (token-by-token response).
+   *
+   * Spec-compliant SSE parser: events are separated by `\n\n`, each event
+   * may have multiple `data:` lines that get concatenated, and `:`-prefixed
+   * comment lines are ignored (they're keep-alives).
    */
   async askStream(
     question: string,
@@ -226,18 +223,29 @@ class ApiClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    const headers = await this.getHeaders()
-
     const response = await fetch(`${API_BASE_URL}/chat/ask/stream`, {
       method: "POST",
-      headers,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+      },
       body: JSON.stringify({ question, chat_history: chatHistory }),
       signal,
     })
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }))
-      callbacks.onError(error.detail || `Request failed: ${response.status}`)
+      if (redirectToSignInOn401(response.status)) return
+      const text = await response.text().catch(() => "")
+      let detail = `HTTP error ${response.status}`
+      try {
+        const parsed = JSON.parse(text)
+        detail = parsed.detail || detail
+      } catch {
+        if (text) detail = text.slice(0, 200)
+      }
+      callbacks.onError(detail)
       return
     }
 
@@ -249,7 +257,34 @@ class ApiClient {
 
     const decoder = new TextDecoder()
     let buffer = ""
-    let eventType = ""
+
+    const dispatchEvent = (rawEvent: string) => {
+      let eventType = "message"
+      const dataLines: string[] = []
+      for (const line of rawEvent.split("\n")) {
+        if (!line || line.startsWith(":")) continue // keep-alive / comment
+        if (line.startsWith("event:")) eventType = line.slice(6).trim()
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart())
+      }
+      if (dataLines.length === 0) return
+      const data = dataLines.join("\n")
+      let parsed: unknown = data
+      try { parsed = JSON.parse(data) } catch { /* string passthrough */ }
+      switch (eventType) {
+        case "sources":
+          callbacks.onSources(parsed as ChatSource[])
+          break
+        case "token":
+          callbacks.onToken((parsed as { text: string }).text || "")
+          break
+        case "done":
+          callbacks.onDone()
+          break
+        case "error":
+          callbacks.onError((parsed as { message: string }).message || String(parsed))
+          break
+      }
+    }
 
     try {
       while (true) {
@@ -257,36 +292,16 @@ class ApiClient {
         if (done) break
 
         buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() || ""
-
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim()
-          } else if (line.startsWith("data: ") && eventType) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              switch (eventType) {
-                case "sources":
-                  callbacks.onSources(data)
-                  break
-                case "token":
-                  callbacks.onToken(data.text)
-                  break
-                case "done":
-                  callbacks.onDone()
-                  break
-                case "error":
-                  callbacks.onError(data.message)
-                  break
-              }
-            } catch {
-              // skip malformed data
-            }
-            eventType = ""
-          }
+        let sep
+        // Standard SSE event separator is a blank line ("\n\n").
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, sep)
+          buffer = buffer.slice(sep + 2)
+          if (rawEvent.length > 0) dispatchEvent(rawEvent)
         }
       }
+      // Flush any trailing event without separator (shouldn't happen with backend, but safe).
+      if (buffer.length > 0) dispatchEvent(buffer)
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         reader.cancel()

@@ -1,8 +1,8 @@
 """
-Admin Router - User Data Management
+Admin Router — User Data Management
 
-Clerk handles authentication (logout via frontend).
-This router provides data management operations.
+Better Auth handles sign-in/sign-up/sign-out from the Next.js frontend.
+This router provides data management operations on the user's RAG corpus.
 """
 import logging
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -22,7 +22,7 @@ def clear_user_data(
     """
     Clears all user data (documents) from the knowledge base.
 
-    User session/logout is handled by Clerk on the frontend.
+    User session/logout is handled by Better Auth on the frontend.
     This endpoint only clears RAG data.
     """
     try:

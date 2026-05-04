@@ -1,10 +1,10 @@
 """
-Security module - Clerk JWT Authentication
+Security module — Better Auth bridge.
 
-Migrated from cookie-based sessions to stateless JWT auth.
-All user data comes from Clerk - no local User table needed.
+Re-exports the auth dependency under the legacy ``require_auth`` name so
+existing routes don't need to change.
 """
-from .clerk_auth import require_clerk_auth
+from .auth import require_auth_user_id
 
-# Re-export for backward compatibility with existing routes
-require_auth = require_clerk_auth
+# Existing routes call ``Depends(require_auth)`` and expect a string user_id.
+require_auth = require_auth_user_id

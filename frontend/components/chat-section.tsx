@@ -5,8 +5,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type ChatSource } from "@/lib/api"
-import { MessageSquare, Send, RotateCcw, Loader2, FileText, User, Bot, AlertCircle, Info } from "lucide-react"
+import { MessageSquare, Send, RotateCcw, Loader2, FileText, User, Bot, AlertCircle, Info, Square } from "lucide-react"
 import { cn } from "@/lib/utils"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -129,11 +131,17 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
         },
         onError: (message) => {
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: message, isStreaming: false }
-                : m
-            )
+            prev.map((m) => {
+              if (m.id !== assistantId) return m
+              // Preserve any already-streamed tokens, append the error so the
+              // user can see what they had + why it stopped.
+              const prefix = m.content ? `${m.content}\n\n` : ""
+              return {
+                ...m,
+                content: `${prefix}⚠ ${message}`,
+                isStreaming: false,
+              }
+            })
           )
         },
       }, controller.signal)
@@ -240,12 +248,32 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
                         : "bg-card border border-border/50"
                     )}
                   >
-                    <p className="text-sm whitespace-pre-wrap">
-                      {message.content}
+                    <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-pre:bg-muted prose-pre:text-foreground prose-code:before:hidden prose-code:after:hidden prose-headings:my-2">
+                      {message.role === "user" ? (
+                        <p className="whitespace-pre-wrap m-0">{message.content}</p>
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            a: ({ node, ...props }) => (
+                              <a {...props} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline" />
+                            ),
+                            code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) => {
+                              const isBlock = (className || "").includes("language-")
+                              if (isBlock) {
+                                return <code className={cn("text-xs", className)} {...props}>{children}</code>
+                              }
+                              return <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono" {...props}>{children}</code>
+                            },
+                          }}
+                        >
+                          {message.content || (message.isStreaming ? " " : "")}
+                        </ReactMarkdown>
+                      )}
                       {message.isStreaming && (
                         <span className="inline-block w-2 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
                       )}
-                    </p>
+                    </div>
 
                     {message.role === "assistant" && message.sources && message.sources.length > 0 && !message.isStreaming && (
                       <div className="pt-2 border-t border-border/30 space-y-2">
@@ -310,23 +338,26 @@ export function ChatSection({ hasDocuments, onReset, systemMessage }: ChatSectio
           />
 
           <div className="flex gap-2">
-            <Button
-              onClick={handleAsk}
-              disabled={loading || !question.trim() || !hasDocuments}
-              className="flex-1"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <Send className="mr-2 h-4 w-4" />
-                  Send
-                </>
-              )}
-            </Button>
+            {loading ? (
+              <Button
+                onClick={() => abortControllerRef.current?.abort()}
+                variant="outline"
+                className="flex-1"
+                title="Stop generating"
+              >
+                <Square className="mr-2 h-4 w-4 fill-current" />
+                Stop
+              </Button>
+            ) : (
+              <Button
+                onClick={handleAsk}
+                disabled={!question.trim() || !hasDocuments}
+                className="flex-1"
+              >
+                <Send className="mr-2 h-4 w-4" />
+                Send
+              </Button>
+            )}
             <Button
               onClick={() => setClearDialogOpen(true)}
               disabled={loading || messages.length === 0}
